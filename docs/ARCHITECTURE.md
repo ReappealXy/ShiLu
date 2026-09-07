@@ -1,0 +1,56 @@
+# 拾录技术架构
+
+## 1. 技术选型
+
+- **桌面容器：Tauri 2**：生成 Windows EXE，体积和内存占用较小，Rust 负责安全的本地文件操作。
+- **前端：Vue 3 + TypeScript + Vite**：适合快速实现编辑器、列表、弹窗和动画。
+- **组件：PrimeVue 4 + PrimeIcons**：提供稳定的按钮、对话框、标签、进度和通知组件。
+- **状态：Pinia**：管理资料列表、编辑会话、识别任务和设置状态。
+- **本地逻辑：Rust**：目录创建、文件读写、图片复制、搜索索引和密钥保护。
+- **内容格式：Markdown + YAML Front Matter**：人类可读、易备份、易被 AI 和其他笔记软件读取。
+- **设置格式：JSON**：保存资料库路径、界面偏好和模型连接配置。
+- **搜索：内存索引 + `search-index.json` 缓存**：第一版不使用 SQL；启动时扫描 Markdown，修改后增量更新缓存。
+
+## 2. 推荐目录
+
+```text
+ShiLu/
+├─ docs/
+├─ src/                    # Vue 页面和组件
+├─ src-tauri/
+│  └─ src/                 # Rust 命令与文件服务
+├─ public/
+└─ package.json
+```
+
+## 3. 功能模块
+
+- `library`：资料列表、筛选、搜索、排序。
+- `capture`：图片导入、预览、排序和识别任务。
+- `editor`：Markdown 编辑和结构化字段编辑。
+- `ai`：视觉识别、润色、摘要和标签生成；统一适配 OpenAI 兼容接口。
+- `storage`：资料文件夹、图片、草稿和版本文件的读写。
+- `indexer`：关键词索引生成、增量更新和重建。
+- `settings`：模型配置、资料库路径、主题和备份操作。
+
+## 4. AI 接口边界
+
+前端不直接保存明文 Key。调用流程为：前端发起任务 -> Rust 读取本地加密设置 -> Rust 发送请求 -> 返回结构化 JSON -> 前端显示可编辑草稿。
+
+模型适配器至少支持：`base_url`、`api_key`、`model`、`temperature`、超时和重试次数。视觉请求使用图片文件转 Base64 或服务商接受的本地上传格式。服务端返回必须经过字段校验，失败时保留原始 OCR 文本。
+
+## 5. Windows 打包
+
+- 开发：`npm run tauri dev`
+- 前端检查：`npm run build`
+- Windows 安装包：`npm run tauri build -- --bundles nsis`
+- 发布格式：优先 NSIS 安装包，后续可补 MSI。
+- 首次启动引导用户选择资料库目录；默认目录放在用户文档下的 `ShiLuData`。
+
+## 6. 安全与恢复
+
+- API Key 使用 Windows DPAPI 或 Tauri Stronghold 加密，界面只显示掩码。
+- 任何 AI 失败都不能覆盖用户现有正文。
+- 保存采用临时文件写入后原子替换，防止中断导致 Markdown 损坏。
+- 提供“打开资料库目录”和“重建搜索索引”操作。
+

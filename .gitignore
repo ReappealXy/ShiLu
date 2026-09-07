@@ -1,0 +1,8 @@
+# Temporary reference checkout and image-generation prompts
+.reference/
+work/
+
+# Local build artifacts
+src-tauri/target/
+dist/
+
