@@ -1,3 +1,4 @@
+mod clipboard;
 mod storage;
 mod tray;
 mod window_state;
@@ -7,6 +8,10 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Acquire the application identity before a second window or tray is created.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::restore_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -29,8 +34,11 @@ pub fn run() {
             storage::initialize_library,
             storage::migrate_library,
             storage::create_article_skeleton,
+            storage::create_article_with_sources,
             storage::move_article_to_trash,
             storage::import_article_images,
+            storage::import_article_sources,
+            clipboard::read_clipboard_image,
             storage::read_article,
             storage::save_article,
             storage::list_articles,

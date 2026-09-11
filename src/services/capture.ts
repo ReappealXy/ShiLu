@@ -27,6 +27,22 @@ export type CaptureResult = {
   images: ImageImportResult;
 };
 
+export type ImageSource =
+  | { kind: "path"; path: string }
+  | { kind: "clipboard"; name: string; base64: string };
+
+export function createArticleWithSources(title: string, sourceUrl: string, sources: ImageSource[]): Promise<CaptureResult> {
+  return invoke<CaptureResult>("create_article_with_sources", {
+    title,
+    sourceUrl: sourceUrl.trim() || null,
+    sources: sources.map((source) => ({ ...source })),
+  });
+}
+
+export function importArticleSources(articleReference: string, sources: ImageSource[]): Promise<ImageImportResult> {
+  return invoke<ImageImportResult>("import_article_sources", { articleReference, sources: sources.map((source) => ({ ...source })) });
+}
+
 export function createArticleSkeleton(title: string, sourceUrl?: string): Promise<ArticleSkeleton> {
   return invoke<ArticleSkeleton>("create_article_skeleton", {
     title,
@@ -51,4 +67,3 @@ export async function createArticleWithImages(
   const images = await importArticleImages(article.folderName, sourcePaths);
   return { article, images };
 }
-

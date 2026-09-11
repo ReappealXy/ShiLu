@@ -13,11 +13,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.3.0", features = [] }
 
 [dependencies]
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+base64 = "0.22"
 chrono = { version = "0.4.45", features = ["clock"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.5.0", features = ["tray-icon"] }
 tauri-plugin-dialog = "2.3.0"
 tauri-plugin-fs = "2.3.0"
 tauri-plugin-opener = "2.3.0"
+tauri-plugin-single-instance = "2"
 windows = { version = "0.61", features = ["Foundation", "Graphics_Imaging", "Media_Ocr", "Storage_Streams"] }

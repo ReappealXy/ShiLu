@@ -8,6 +8,7 @@ import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
+  ClipboardPaste,
   FileImage,
   ImagePlus,
   Link2,
@@ -17,7 +18,8 @@ import {
   Upload,
   X,
 } from "@lucide/vue";
-import { createArticleWithImages } from "../services/capture";
+import { createArticleWithSources, type ImageSource } from "../services/capture";
+import { hasPastedText, imageFromBlob, pastedImageFiles, readClipboardImages, type ClipboardImage } from "../services/clipboard";
 import { getErrorMessage } from "../services/library";
 import { useRouter } from "vue-router";
 
@@ -25,6 +27,7 @@ const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp"]);
 
 type CaptureImage = {
   id: string;
+  source: ImageSource;
   path: string;
   name: string;
   extension: string;
@@ -43,14 +46,18 @@ const fileInput = ref<HTMLInputElement | null>(null);
 const dragActive = ref(false);
 const reorderFrom = ref<number | null>(null);
 const saving = ref(false);
+const pendingAdds = ref(0);
 const errorMessage = ref("");
 const successMessage = ref("");
 const savedFolderName = ref("");
 let imageSequence = 0;
 let stopNativeDragListener: (() => void) | undefined;
+let disposed = false;
+let addQueue = Promise.resolve();
 
 const imageCountLabel = computed(() => `${images.value.length} 张图片`);
-const canSave = computed(() => Boolean(title.value.trim()) && images.value.length > 0 && !saving.value && !successMessage.value);
+const queueLocked = computed(() => saving.value || pendingAdds.value > 0 || Boolean(successMessage.value));
+const canSave = computed(() => Boolean(title.value.trim()) && images.value.length > 0 && !queueLocked.value);
 
 function getFileName(path: string): string {
   const normalized = path.replaceAll("\\", "/");
@@ -78,6 +85,7 @@ function imagePreview(path: string): string {
 function createImage(path: string, name = getFileName(path), previewUrl = imagePreview(path), objectUrl = false, sizeBytes: number | null = null): CaptureImage {
   const image: CaptureImage = {
     id: `${Date.now()}-${imageSequence++}`,
+    source: { kind: "path", path },
     path,
     name,
     extension: getExtension(name),
@@ -109,6 +117,7 @@ async function inspectImage(image: CaptureImage) {
 }
 
 function addImagePaths(paths: string[]) {
+  if (queueLocked.value || disposed) return;
   const existingPaths = new Set(images.value.map((image) => image.path).filter(Boolean));
   const unsupported: string[] = [];
   for (const path of paths) {
@@ -131,27 +140,54 @@ function addImagePaths(paths: string[]) {
 }
 
 function addBrowserFiles(files: File[]) {
-  const unsupported: string[] = [];
-  const existingNames = new Set(images.value.map((image) => image.name));
-  for (const file of files) {
-    if (!isSupportedImage(file.name)) {
-      unsupported.push(file.name);
-      continue;
+  const supported = files.filter((file) => isSupportedImage(file.name) || file.type.startsWith("image/"));
+  if (!supported.length) {
+    errorMessage.value = "请添加 PNG、JPG、JPEG 或 WEBP 图片。";
+    return;
+  }
+  queueClipboardImages(() => Promise.all(supported.map(imageFromBlob)));
+}
+
+function queueClipboardImages(load: () => Promise<ClipboardImage[]>) {
+  if (saving.value || successMessage.value || disposed) return;
+  pendingAdds.value++;
+  errorMessage.value = "";
+  // Read now, then append in invocation order even when image decoding is slower.
+  const result = load().then((items) => ({ items }), (error: unknown) => ({ error }));
+  addQueue = addQueue.then(async () => {
+    const outcome = await result;
+    if (disposed) return;
+    if ("error" in outcome) {
+      errorMessage.value = getErrorMessage(outcome.error, "无法粘贴图片，请重新截图后再试。");
+      return;
     }
-    if (existingNames.has(file.name)) continue;
-    existingNames.add(file.name);
-    const previewUrl = URL.createObjectURL(file);
-    images.value.push(createImage("", file.name, previewUrl, true, file.size));
+    for (const item of outcome.items) {
+      images.value.push({
+        id: `${Date.now()}-${imageSequence++}`, source: item.source, path: "", name: item.source.name,
+        extension: "png", previewUrl: item.previewUrl, objectUrl: false,
+        sizeBytes: item.sizeBytes, width: item.width, height: item.height,
+      });
+    }
+  }).finally(() => { pendingAdds.value--; });
+}
+
+function pasteImages() {
+  queueClipboardImages(readClipboardImages);
+}
+
+function onPaste(event: ClipboardEvent) {
+  const files = pastedImageFiles(event);
+  if (files.length) {
+    event.preventDefault();
+    if (!saving.value && !successMessage.value) addBrowserFiles(files);
+  } else if (!hasPastedText(event) && isTauri()) {
+    event.preventDefault();
+    pasteImages();
   }
-  if (unsupported.length) {
-    errorMessage.value = `已跳过不支持的文件：${unsupported.slice(0, 3).join("、")}${unsupported.length > 3 ? "等" : ""}。`;
-  } else if (files.length) {
-    errorMessage.value = "";
-  }
-  successMessage.value = "";
 }
 
 async function pickImages() {
+  if (queueLocked.value) return;
   errorMessage.value = "";
   if (!isTauri()) {
     fileInput.value?.click();
@@ -181,7 +217,7 @@ function onFileInput(event: Event) {
 function onDrop(event: DragEvent) {
   event.preventDefault();
   dragActive.value = false;
-  if (reorderFrom.value !== null) return;
+  if (reorderFrom.value !== null || queueLocked.value || isTauri()) return;
   const files = Array.from(event.dataTransfer?.files ?? []);
   if (files.length) addBrowserFiles(files);
 }
@@ -191,11 +227,13 @@ function onDragOver() {
 }
 
 function removeImage(index: number) {
+  if (queueLocked.value) return;
   const [removed] = images.value.splice(index, 1);
   if (removed?.objectUrl) URL.revokeObjectURL(removed.previewUrl);
 }
 
 function clearImages() {
+  if (saving.value || pendingAdds.value > 0) return;
   images.value.forEach((image) => {
     if (image.objectUrl) URL.revokeObjectURL(image.previewUrl);
   });
@@ -203,6 +241,7 @@ function clearImages() {
 }
 
 function moveImage(index: number, offset: number) {
+  if (queueLocked.value) return;
   const target = index + offset;
   if (target < 0 || target >= images.value.length) return;
   const current = images.value[index];
@@ -211,13 +250,14 @@ function moveImage(index: number, offset: number) {
 }
 
 function startReorder(index: number) {
+  if (queueLocked.value) return;
   reorderFrom.value = index;
 }
 
 function dropReorder(targetIndex: number) {
   const sourceIndex = reorderFrom.value;
   reorderFrom.value = null;
-  if (sourceIndex === null || sourceIndex === targetIndex) return;
+  if (sourceIndex === null || sourceIndex === targetIndex || queueLocked.value) return;
   const [moved] = images.value.splice(sourceIndex, 1);
   if (moved) images.value.splice(targetIndex, 0, moved);
 }
@@ -248,9 +288,9 @@ function getNativeDragPath(event: { payload: { type: string; paths?: string[] } 
 }
 
 async function saveArticle() {
+  if (queueLocked.value) return;
   errorMessage.value = "";
   successMessage.value = "";
-  const sourcePaths = images.value.map((image) => image.path).filter(Boolean);
   if (!title.value.trim()) {
     errorMessage.value = "请先填写资料标题。";
     return;
@@ -259,14 +299,9 @@ async function saveArticle() {
     errorMessage.value = "请至少添加一张图片。";
     return;
   }
-  if (sourcePaths.length !== images.value.length) {
-    errorMessage.value = "当前有图片缺少本地文件路径，请通过系统选择器重新添加后再保存。";
-    return;
-  }
-
   saving.value = true;
   try {
-    const result = await createArticleWithImages(title.value.trim(), sourceUrl.value.trim(), sourcePaths);
+    const result = await createArticleWithSources(title.value.trim(), sourceUrl.value.trim(), images.value.map((image) => image.source));
     savedFolderName.value = result.article.folderName;
     successMessage.value = `已保存 ${result.images.images.length} 张图片，资料文件夹已经创建。`;
   } catch (error) {
@@ -286,6 +321,7 @@ function startAnotherArticle() {
 }
 
 onMounted(async () => {
+  window.addEventListener("paste", onPaste);
   if (!isTauri()) return;
   try {
     stopNativeDragListener = await getCurrentWebview().onDragDropEvent(getNativeDragPath);
@@ -295,6 +331,8 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  disposed = true;
+  window.removeEventListener("paste", onPaste);
   stopNativeDragListener?.();
   images.value.forEach((image) => {
     if (image.objectUrl) URL.revokeObjectURL(image.previewUrl);
@@ -323,22 +361,23 @@ onBeforeUnmount(() => {
         <div class="capture-dropzone" :class="{ 'capture-dropzone-active': dragActive }" @dragover.prevent="onDragOver" @dragleave.prevent="dragActive = false" @drop.prevent="onDrop">
           <span class="capture-dropzone-icon"><Upload :size="22" aria-hidden="true" /></span>
           <strong>{{ dragActive ? "松开鼠标即可添加" : "把截图拖到这里" }}</strong>
-          <p>支持一次添加多张图片，软件会按当前顺序保存。</p>
-          <button class="button button-secondary" type="button" @click="pickImages"><ImagePlus :size="17" aria-hidden="true" />选择图片</button>
+          <p>截图后可直接按 Ctrl + V 粘贴，无需先保存文件。</p>
+          <div class="capture-add-actions"><button class="button button-secondary" type="button" :disabled="queueLocked" @click="pickImages"><ImagePlus :size="17" aria-hidden="true" />选择图片</button><button class="button button-secondary" type="button" :disabled="queueLocked" @click="pasteImages"><LoaderCircle v-if="pendingAdds" :size="17" class="capture-spin" aria-hidden="true" /><ClipboardPaste v-else :size="17" aria-hidden="true" />{{ pendingAdds ? "正在读取..." : "粘贴图片" }}</button></div>
           <small>PNG、JPG、JPEG、WEBP</small>
           <input ref="fileInput" class="capture-file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple @change="onFileInput" />
         </div>
 
-        <div v-if="images.length" class="capture-queue-heading"><span>素材顺序</span><button class="capture-clear-button" type="button" @click="clearImages"><Trash2 :size="14" aria-hidden="true" />清空</button></div>
+        <p v-if="pendingAdds" class="capture-paste-status" role="status">正在读取图片，完成后即可确认保存。</p>
+        <div v-if="images.length" class="capture-queue-heading"><span>素材顺序</span><button class="capture-clear-button" type="button" :disabled="queueLocked" @click="clearImages"><Trash2 :size="14" aria-hidden="true" />清空</button></div>
         <ol v-if="images.length" class="capture-queue" aria-label="已选择的图片">
-          <li v-for="(image, index) in images" :key="image.id" class="capture-queue-item" :class="{ 'capture-queue-item-dragging': reorderFrom === index }" draggable="true" @dragstart="startReorder(index)" @dragend="endReorder" @dragover.prevent @drop.stop="dropReorder(index)">
+          <li v-for="(image, index) in images" :key="image.id" class="capture-queue-item" :class="{ 'capture-queue-item-dragging': reorderFrom === index }" :draggable="!queueLocked" @dragstart="startReorder(index)" @dragend="endReorder" @dragover.prevent @drop.stop="dropReorder(index)">
             <span class="capture-queue-index">{{ String(index + 1).padStart(2, "0") }}</span>
             <div class="capture-thumb"><img :src="image.previewUrl" :alt="image.name" /></div>
             <div class="capture-image-info"><strong :title="image.name">{{ image.name }}</strong><small>{{ formatDimensions(image) }} · {{ formatBytes(image.sizeBytes) }}</small></div>
             <div class="capture-item-actions">
-              <button class="icon-button" type="button" title="上移" :aria-label="`将 ${image.name} 上移`" :disabled="index === 0" @click="moveImage(index, -1)"><ArrowUp :size="15" /></button>
-              <button class="icon-button" type="button" title="下移" :aria-label="`将 ${image.name} 下移`" :disabled="index === images.length - 1" @click="moveImage(index, 1)"><ArrowDown :size="15" /></button>
-              <button class="icon-button capture-remove-button" type="button" title="移除图片" :aria-label="`移除 ${image.name}`" @click="removeImage(index)"><X :size="15" /></button>
+              <button class="icon-button" type="button" title="上移" :aria-label="`将 ${image.name} 上移`" :disabled="queueLocked || index === 0" @click="moveImage(index, -1)"><ArrowUp :size="15" /></button>
+              <button class="icon-button" type="button" title="下移" :aria-label="`将 ${image.name} 下移`" :disabled="queueLocked || index === images.length - 1" @click="moveImage(index, 1)"><ArrowDown :size="15" /></button>
+              <button class="icon-button capture-remove-button" type="button" title="移除图片" :disabled="queueLocked" :aria-label="`移除 ${image.name}`" @click="removeImage(index)"><X :size="15" /></button>
             </div>
           </li>
         </ol>
@@ -354,7 +393,7 @@ onBeforeUnmount(() => {
         <form class="capture-form" @submit.prevent="saveArticle">
           <label class="capture-field"><span>资料标题 <b>必填</b></span><input v-model="title" type="text" maxlength="120" placeholder="例如：AI 创作工具合集" autocomplete="off" /></label>
           <label class="capture-field"><span>来源链接 <em>可选</em></span><span class="capture-input-with-icon"><Link2 :size="16" aria-hidden="true" /><input v-model="sourceUrl" type="url" placeholder="https://..." autocomplete="url" /></span></label>
-          <p class="capture-form-hint">标题会用于资料文件夹名称。来源链接会写入 Markdown 的链接字段，之后仍然可以编辑。</p>
+          <p class="capture-form-hint">确认保存后，截图会存入这条资料的 images 文件夹。之后可进入编辑页手动识别文字，或继续补充图片。</p>
 
           <div class="capture-form-actions"><button class="button button-primary capture-save-button" type="submit" :disabled="!canSave"><LoaderCircle v-if="saving" :size="17" class="capture-spin" aria-hidden="true" /><CheckCircle2 v-else :size="17" aria-hidden="true" />{{ saving ? "正在保存..." : "保存资料" }}</button><button v-if="successMessage" class="button button-secondary" type="button" @click="router.push(`/articles/${savedFolderName}/edit`)"><FileImage :size="16" aria-hidden="true" />编辑资料</button><button v-if="successMessage" class="button button-secondary" type="button" @click="startAnotherArticle"><ImagePlus :size="16" aria-hidden="true" />继续新建</button></div>
         </form>
@@ -383,6 +422,9 @@ onBeforeUnmount(() => {
 .capture-dropzone strong { color: var(--ink); font-size: 15px; font-weight: 720; }
 .capture-dropzone p { margin: 7px 0 15px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .capture-dropzone small { margin-top: 10px; color: var(--muted); font-size: 10px; }
+.capture-add-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.capture-paste-status { margin: 12px 0; color: var(--muted-strong); font-size: 12px; line-height: 1.5; }
+.capture-add-actions button:disabled, .capture-clear-button:disabled { opacity: 0.55; cursor: default; }
 .capture-file-input { display: none; }
 .capture-queue-heading { display: flex; align-items: center; justify-content: space-between; margin: 21px 0 9px; color: var(--muted-strong); font-size: 12px; font-weight: 700; }
 .capture-clear-button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 6px; color: var(--muted); background: transparent; border: 0; border-radius: 5px; font-size: 11px; }

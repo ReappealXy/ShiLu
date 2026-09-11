@@ -1,10 +1,14 @@
+use crate::clipboard::{decode_clipboard_png, validate_image_bytes, MAX_IMAGE_BYTES};
 use chrono::{Local, SecondsFormat};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Mutex,
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
@@ -15,8 +19,11 @@ const TRASH_DIR_NAME: &str = ".shilu-trash";
 const SETTINGS_FILE_NAME: &str = "settings.json";
 const SEARCH_INDEX_FILE_NAME: &str = "search-index.json";
 const ALLOWED_IMAGE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "webp"];
+const MAX_IMPORT_IMAGES: usize = 50;
+const MAX_IMPORT_BYTES: u64 = 200 * 1024 * 1024;
 
 static ARTICLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static IMAGE_IMPORT_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,7 +33,7 @@ pub struct StorageError {
 }
 
 impl StorageError {
-    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -38,7 +45,7 @@ impl StorageError {
     }
 }
 
-type StorageResult<T> = Result<T, StorageError>;
+pub(crate) type StorageResult<T> = Result<T, StorageError>;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +90,20 @@ pub struct ImageImportResult {
     pub article_id: String,
     pub article_folder_name: String,
     pub images: Vec<ImportedImage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ImageSource {
+    Path { path: String },
+    Clipboard { name: String, base64: String },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArticleCreateResult {
+    pub article: ArticleSkeleton,
+    pub images: ImageImportResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,6 +346,35 @@ pub fn import_article_images(
 ) -> StorageResult<ImageImportResult> {
     let root = configured_ready_library(&app)?;
     import_article_images_at(&root, &article_reference, &source_paths)
+}
+
+#[tauri::command]
+pub async fn create_article_with_sources(
+    app: AppHandle,
+    title: String,
+    source_url: Option<String>,
+    sources: Vec<ImageSource>,
+) -> StorageResult<ArticleCreateResult> {
+    let root = configured_ready_library(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        create_article_with_sources_at(&root, &title, source_url.as_deref(), &sources)
+    })
+    .await
+    .map_err(|_| StorageError::new("IMAGE_IMPORT_FAILED", "图片导入任务失败，请重试。"))?
+}
+
+#[tauri::command]
+pub async fn import_article_sources(
+    app: AppHandle,
+    article_reference: String,
+    sources: Vec<ImageSource>,
+) -> StorageResult<ImageImportResult> {
+    let root = configured_ready_library(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        import_article_sources_at(&root, &article_reference, &sources)
+    })
+    .await
+    .map_err(|_| StorageError::new("IMAGE_IMPORT_FAILED", "图片导入任务失败，请重试。"))?
 }
 
 #[tauri::command]
@@ -640,10 +690,145 @@ fn move_article_to_trash_at(root: &Path, folder_name: &str) -> StorageResult<Tra
 }
 
 struct ValidatedImageSource {
-    path: PathBuf,
+    data: ValidatedImageData,
     original_file_name: String,
     extension: String,
     size_bytes: u64,
+}
+
+enum ValidatedImageData {
+    Path(PathBuf),
+    Bytes(Vec<u8>),
+}
+
+fn validate_sources(sources: &[ImageSource]) -> StorageResult<Vec<ValidatedImageSource>> {
+    if sources.len() > MAX_IMPORT_IMAGES {
+        return Err(StorageError::new(
+            "TOO_MANY_IMAGES",
+            "一次最多导入 50 张图片，请分批添加。",
+        ));
+    }
+    let mut total_bytes = 0_u64;
+    sources
+        .iter()
+        .map(|source| {
+            let source = match source {
+                ImageSource::Path { path } => {
+                    let mut validated = validate_image_source(path)?;
+                    if validated.size_bytes > MAX_IMAGE_BYTES as u64 {
+                        return Err(StorageError::new(
+                            "IMAGE_TOO_LARGE",
+                            "每张图片不能超过 20 MB。",
+                        ));
+                    }
+                    let ValidatedImageData::Path(path) = &validated.data else {
+                        unreachable!()
+                    };
+                    let mut bytes = Vec::with_capacity(validated.size_bytes as usize);
+                    fs::File::open(path)
+                        .map_err(|error| StorageError::io("无法读取来源图片", error))?
+                        .take((MAX_IMAGE_BYTES + 1) as u64)
+                        .read_to_end(&mut bytes)
+                        .map_err(|error| StorageError::io("无法读取来源图片", error))?;
+                    let format = match validated.extension.as_str() {
+                        "png" => image::ImageFormat::Png,
+                        "webp" => image::ImageFormat::WebP,
+                        _ => image::ImageFormat::Jpeg,
+                    };
+                    validate_image_bytes(&bytes, format)?;
+                    validated.size_bytes = bytes.len() as u64;
+                    validated.data = ValidatedImageData::Bytes(bytes);
+                    validated
+                }
+                ImageSource::Clipboard { name, base64 } => {
+                    let bytes = decode_clipboard_png(base64)?;
+                    // The supplied display name is metadata only; filenames are always generated below.
+                    let name = name.rsplit(['/', '\\']).next().unwrap_or("").trim();
+                    ValidatedImageSource {
+                        original_file_name: if name.is_empty() {
+                            "截图.png".to_string()
+                        } else {
+                            name.chars().take(200).collect()
+                        },
+                        extension: "png".to_string(),
+                        size_bytes: bytes.len() as u64,
+                        data: ValidatedImageData::Bytes(bytes),
+                    }
+                }
+            };
+            total_bytes += source.size_bytes;
+            if total_bytes > MAX_IMPORT_BYTES {
+                return Err(StorageError::new(
+                    "IMAGE_BATCH_TOO_LARGE",
+                    "一次导入的图片合计不能超过 200 MB，请分批添加。",
+                ));
+            }
+            Ok(source)
+        })
+        .collect()
+}
+
+fn create_article_with_sources_at(
+    root: &Path,
+    title: &str,
+    source_url: Option<&str>,
+    sources: &[ImageSource],
+) -> StorageResult<ArticleCreateResult> {
+    create_article_with_sources_using(
+        root,
+        title,
+        source_url,
+        sources,
+        import_validated_sources_at,
+    )
+}
+
+fn create_article_with_sources_using(
+    root: &Path,
+    title: &str,
+    source_url: Option<&str>,
+    sources: &[ImageSource],
+    importer: impl FnOnce(&Path, &str, &[ValidatedImageSource]) -> StorageResult<ImageImportResult>,
+) -> StorageResult<ArticleCreateResult> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err(StorageError::new("INVALID_TITLE", "资料标题不能为空。"));
+    }
+    // Validate every input before creating the article, including full image decoding.
+    let validated = validate_sources(sources)?;
+    let article = create_article_skeleton_at(root, title, source_url)?;
+    match importer(root, &article.folder_name, &validated) {
+        Ok(images) => Ok(ArticleCreateResult { article, images }),
+        Err(error) => {
+            if let Err(cleanup_error) = fs::remove_dir_all(Path::new(&article.folder_path)) {
+                return Err(StorageError::new(
+                    "ARTICLE_ROLLBACK_FAILED",
+                    format!(
+                        "{} 新建资料清理失败，请检查文件夹 {}：{}",
+                        error.message, article.folder_path, cleanup_error,
+                    ),
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn import_article_sources_at(
+    root: &Path,
+    article_reference: &str,
+    sources: &[ImageSource],
+) -> StorageResult<ImageImportResult> {
+    if sources.is_empty() {
+        return Err(StorageError::new(
+            "NO_IMAGES_SELECTED",
+            "请至少选择或粘贴一张图片。",
+        ));
+    }
+    // Resolve first so an invalid article reference is rejected before processing image bytes.
+    resolve_article_path(root, article_reference)?;
+    let validated = validate_sources(sources)?;
+    import_validated_sources_at(root, article_reference, &validated)
 }
 
 fn import_article_images_at(
@@ -658,6 +843,22 @@ fn import_article_images_at(
         ));
     }
 
+    resolve_article_path(root, article_reference)?;
+    let sources = source_paths
+        .iter()
+        .map(|source_path| validate_image_source(source_path))
+        .collect::<StorageResult<Vec<_>>>()?;
+    import_validated_sources_at(root, article_reference, &sources)
+}
+
+fn import_validated_sources_at(
+    root: &Path,
+    article_reference: &str,
+    sources: &[ValidatedImageSource],
+) -> StorageResult<ImageImportResult> {
+    let _guard = IMAGE_IMPORT_LOCK.lock().map_err(|_| {
+        StorageError::new("IMAGE_IMPORT_BUSY", "图片导入状态异常，请重启软件后重试。")
+    })?;
     let (article_path, article_folder_name, article_id) =
         resolve_article_path(root, article_reference)?;
     let images_path = fs::canonicalize(article_path.join("images"))
@@ -669,41 +870,34 @@ fn import_article_images_at(
         ));
     }
 
-    let sources = source_paths
-        .iter()
-        .map(|source_path| validate_image_source(source_path))
-        .collect::<StorageResult<Vec<_>>>()?;
     let first_index = next_image_index(&images_path)?;
     let mut imported = Vec::with_capacity(sources.len());
     let mut created_paths = Vec::with_capacity(sources.len());
 
-    for (offset, source) in sources.iter().enumerate() {
-        let index = first_index.checked_add(offset as u64).ok_or_else(|| {
-            StorageError::new("IMAGE_INDEX_OVERFLOW", "文章中的图片数量超出支持范围。")
-        })?;
-        let file_name = format!("{:03}.{}", index, source.extension);
-        let destination = images_path.join(&file_name);
-        if destination.exists() {
-            cleanup_imported_images(&created_paths);
-            return Err(StorageError::new(
-                "IMAGE_DESTINATION_EXISTS",
-                format!("目标图片 {} 已存在，请重试。", file_name),
-            ));
+    let import_result = (|| -> StorageResult<()> {
+        for (offset, source) in sources.iter().enumerate() {
+            let index = first_index.checked_add(offset as u64).ok_or_else(|| {
+                StorageError::new("IMAGE_INDEX_OVERFLOW", "文章中的图片数量超出支持范围。")
+            })?;
+            let file_name = format!("{:03}.{}", index, source.extension);
+            let destination = images_path.join(&file_name);
+            let path = path_to_string(&destination)?;
+            write_imported_image(&source.data, &destination)?;
+            created_paths.push(destination);
+            imported.push(ImportedImage {
+                file_name: file_name.clone(),
+                original_file_name: source.original_file_name.clone(),
+                path,
+                relative_path: format!("images/{}", file_name),
+                extension: source.extension.clone(),
+                size_bytes: source.size_bytes,
+            });
         }
-
-        if let Err(error) = copy_file_atomic(&source.path, &destination) {
-            cleanup_imported_images(&created_paths);
-            return Err(error);
-        }
-        created_paths.push(destination.clone());
-        imported.push(ImportedImage {
-            file_name: file_name.clone(),
-            original_file_name: source.original_file_name.clone(),
-            path: path_to_string(&destination)?,
-            relative_path: format!("images/{}", file_name),
-            extension: source.extension.clone(),
-            size_bytes: source.size_bytes,
-        });
+        Ok(())
+    })();
+    if let Err(error) = import_result {
+        cleanup_imported_images(&created_paths);
+        return Err(error);
     }
 
     Ok(ImageImportResult {
@@ -937,17 +1131,26 @@ fn ocr_article_images_at(root: &Path, article_reference: &str) -> StorageResult<
     })?;
     let mut blocks = Vec::new();
     for path in &image_paths {
-        let stream = FileRandomAccessStream::OpenAsync(
-            &HSTRING::from(path.to_string_lossy().to_string()),
-            FileAccessMode::Read,
-        )
-        .map_err(|error| {
-            StorageError::new("OCR_IMAGE_OPEN_FAILED", format!("无法打开图片：{}", error))
-        })?
-        .get()
-        .map_err(|error| {
-            StorageError::new("OCR_IMAGE_OPEN_FAILED", format!("无法打开图片：{}", error))
-        })?;
+        // Rust canonicalization uses verbatim Windows paths; WinRT rejects that namespace.
+        // Keep canonical paths for storage checks and adapt only at this API boundary.
+        let native_path = path_to_string(path)?;
+        let winrt_path = if let Some(unc) = native_path.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            native_path
+                .strip_prefix(r"\\?\")
+                .unwrap_or(&native_path)
+                .to_string()
+        };
+        let stream =
+            FileRandomAccessStream::OpenAsync(&HSTRING::from(winrt_path), FileAccessMode::Read)
+                .map_err(|error| {
+                    StorageError::new("OCR_IMAGE_OPEN_FAILED", format!("无法打开图片：{}", error))
+                })?
+                .get()
+                .map_err(|error| {
+                    StorageError::new("OCR_IMAGE_OPEN_FAILED", format!("无法打开图片：{}", error))
+                })?;
         let decoder = BitmapDecoder::CreateAsync(&stream)
             .map_err(|error| {
                 StorageError::new("OCR_DECODER_FAILED", format!("无法读取图片：{}", error))
@@ -1169,7 +1372,7 @@ fn validate_image_source(source_path: &str) -> StorageResult<ValidatedImageSourc
         .len();
 
     Ok(ValidatedImageSource {
-        path: canonical_path,
+        data: ValidatedImageData::Path(canonical_path),
         original_file_name,
         extension,
         size_bytes,
@@ -1198,34 +1401,36 @@ fn next_image_index(images_path: &Path) -> StorageResult<u64> {
         .ok_or_else(|| StorageError::new("IMAGE_INDEX_OVERFLOW", "文章中的图片数量超出支持范围。"))
 }
 
-fn copy_file_atomic(source: &Path, destination: &Path) -> StorageResult<()> {
-    let parent = destination
-        .parent()
-        .ok_or_else(|| StorageError::new("INVALID_FILE_PATH", "无法确定图片所在目录。"))?;
-    let file_name = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| StorageError::new("INVALID_FILE_PATH", "图片文件名无效。"))?;
-    let temp_path = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        file_name,
-        std::process::id(),
-        ARTICLE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    ));
-
+fn write_imported_image(source: &ValidatedImageData, destination: &Path) -> StorageResult<()> {
+    // Exclusive creation prevents a competing import from overwriting an existing image.
+    let mut destination_file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                StorageError::new(
+                    "IMAGE_DESTINATION_EXISTS",
+                    "目标图片已存在，未覆盖任何文件，请重试。",
+                )
+            } else {
+                StorageError::io("无法创建导入图片", error)
+            }
+        })?;
     let copy_result = (|| -> Result<(), std::io::Error> {
-        let mut source_file = fs::File::open(source)?;
-        let mut destination_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        std::io::copy(&mut source_file, &mut destination_file)?;
+        match source {
+            ValidatedImageData::Path(path) => {
+                let mut source_file = fs::File::open(path)?;
+                std::io::copy(&mut source_file, &mut destination_file)?;
+            }
+            ValidatedImageData::Bytes(bytes) => destination_file.write_all(bytes)?,
+        }
         destination_file.sync_all()?;
-        drop(destination_file);
-        fs::rename(&temp_path, destination)
+        Ok(())
     })();
+    drop(destination_file);
     if let Err(error) = copy_result {
-        let _ = fs::remove_file(&temp_path);
+        let _ = fs::remove_file(destination);
         return Err(StorageError::io("无法复制图片", error));
     }
     Ok(())
@@ -1385,10 +1590,296 @@ fn path_to_string(path: &Path) -> StorageResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    fn screenshot_png(color: [u8; 4]) -> Vec<u8> {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&color, 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        bytes
+    }
+
+    fn screenshot_source(color: [u8; 4]) -> ImageSource {
+        ImageSource::Clipboard {
+            name: "截图.png".to_string(),
+            base64: STANDARD.encode(screenshot_png(color)),
+        }
+    }
 
     fn temporary_library_root(test_name: &str) -> PathBuf {
         let nonce = format!("{}-{}", std::process::id(), short_id());
         std::env::temp_dir().join(format!("shilu-storage-test-{}-{}", test_name, nonce))
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Requires Windows OCR and SHILU_OCR_TEST_IMAGE with a PNG containing SCREENSHOT and OCR TEST"]
+    fn clipboard_png_reaches_windows_ocr_without_changing_markdown() {
+        let fixture =
+            std::env::var("SHILU_OCR_TEST_IMAGE").expect("set a controlled OCR fixture path");
+        let png = fs::read(fixture).expect("read controlled PNG fixture");
+        let root = temporary_library_root("clipboard-ocr");
+        fs::create_dir_all(&root).unwrap();
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let created = create_article_with_sources_at(
+                &root,
+                "剪贴板 OCR 验收",
+                Some("https://example.com/clipboard-fixture"),
+                &[ImageSource::Clipboard {
+                    name: "image.png".into(),
+                    base64: STANDARD.encode(&png),
+                }],
+            )?;
+            let markdown_before = fs::read(&created.article.markdown_path).unwrap();
+            let recognized = ocr_article_images_at(&root, &created.article.folder_name)?;
+            assert_eq!(recognized.image_count, 1);
+            assert!(
+                recognized.text.to_uppercase().contains("SCREENSHOT"),
+                "{}",
+                recognized.text
+            );
+            assert!(
+                recognized.text.to_uppercase().contains("OCR TEST"),
+                "{}",
+                recognized.text
+            );
+            assert_eq!(
+                fs::read_to_string(&recognized.raw_path).unwrap(),
+                recognized.text
+            );
+            assert_eq!(fs::read(&created.images.images[0].path).unwrap(), png);
+            assert_eq!(
+                fs::read(&created.article.markdown_path).unwrap(),
+                markdown_before
+            );
+            println!("PNG saved unchanged; real Windows OCR recognized SCREENSHOT and OCR TEST; raw/ocr.txt saved; Markdown unchanged");
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.expect("clipboard PNG should be recognized by real Windows OCR");
+    }
+
+    #[test]
+    fn mixed_sources_keep_order_duplicate_names_and_append_without_overwrite() {
+        let root = temporary_library_root("mixed-sources");
+        fs::create_dir_all(&root).unwrap();
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let source_path = root.join("source.png");
+            let blue = screenshot_png([0, 0, 255, 255]);
+            fs::write(&source_path, &blue).unwrap();
+            let created = create_article_with_sources_at(
+                &root,
+                "混合截图",
+                None,
+                &[
+                    screenshot_source([255, 0, 0, 255]),
+                    ImageSource::Path {
+                        path: path_to_string(&source_path)?,
+                    },
+                    screenshot_source([0, 255, 0, 255]),
+                ],
+            )?;
+            assert_eq!(
+                created
+                    .images
+                    .images
+                    .iter()
+                    .map(|image| image.file_name.as_str())
+                    .collect::<Vec<_>>(),
+                ["001.png", "002.png", "003.png"]
+            );
+            assert_eq!(
+                created.images.images[0].original_file_name,
+                created.images.images[2].original_file_name
+            );
+            assert_eq!(
+                fs::read(&created.images.images[0].path).unwrap(),
+                screenshot_png([255, 0, 0, 255])
+            );
+            assert_eq!(fs::read(&created.images.images[1].path).unwrap(), blue);
+            assert_eq!(
+                fs::read(&created.images.images[2].path).unwrap(),
+                screenshot_png([0, 255, 0, 255])
+            );
+            let added = import_article_sources_at(
+                &root,
+                &created.article.id,
+                &[screenshot_source([0, 0, 0, 0])],
+            )?;
+            assert_eq!(added.images[0].file_name, "004.png");
+            assert_eq!(
+                fs::read(&created.images.images[0].path).unwrap(),
+                screenshot_png([255, 0, 0, 255])
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.expect("混合图片与同名截图应保持顺序且不会覆盖旧图");
+    }
+
+    #[test]
+    fn malformed_clipboard_batch_never_leaves_a_new_article_or_partial_images() {
+        let root = temporary_library_root("invalid-clipboard");
+        fs::create_dir_all(&root).unwrap();
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let sources = [
+                screenshot_source([1, 2, 3, 255]),
+                ImageSource::Clipboard {
+                    name: "broken.png".into(),
+                    base64: STANDARD.encode(b"not a PNG"),
+                },
+            ];
+            assert!(create_article_with_sources_at(&root, "应回滚", None, &sources).is_err());
+            assert_eq!(
+                fs::read_dir(root.join(ARTICLES_DIR_NAME)).unwrap().count(),
+                0
+            );
+            let article = create_article_skeleton_at(&root, "已有资料", None)?;
+            assert!(import_article_sources_at(&root, &article.id, &sources).is_err());
+            assert_eq!(
+                fs::read_dir(Path::new(&article.folder_path).join("images"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+            assert!(Path::new(&article.markdown_path).is_file());
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.expect("无效剪贴板图片不能造成残留资料");
+    }
+
+    #[test]
+    fn failed_image_write_rolls_back_only_this_batch() {
+        let root = temporary_library_root("import-rollback");
+        fs::create_dir_all(&root).unwrap();
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let article = create_article_with_sources_at(
+                &root,
+                "保留已有图片",
+                None,
+                &[screenshot_source([9, 8, 7, 255])],
+            )?;
+            let images_path = Path::new(&article.article.folder_path).join("images");
+            // The directory is not counted as an existing numbered image, but blocks the second write.
+            fs::create_dir(images_path.join("003.png")).unwrap();
+            fs::write(images_path.join("003.png").join("keep.txt"), "keep").unwrap();
+            assert!(import_article_sources_at(
+                &root,
+                &article.article.id,
+                &[
+                    screenshot_source([1, 2, 3, 255]),
+                    screenshot_source([4, 5, 6, 255]),
+                ]
+            )
+            .is_err());
+            assert!(!images_path.join("002.png").exists());
+            assert_eq!(
+                fs::read(images_path.join("001.png")).unwrap(),
+                screenshot_png([9, 8, 7, 255])
+            );
+            assert_eq!(
+                fs::read_to_string(images_path.join("003.png").join("keep.txt")).unwrap(),
+                "keep"
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.expect("导入失败应清理本批图片并保留原文件");
+    }
+
+    #[test]
+    fn image_write_failure_removes_only_newly_created_article() {
+        let root = temporary_library_root("article-image-rollback");
+        fs::create_dir_all(&root).unwrap();
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let previous = create_article_skeleton_at(&root, "应保留", None)?;
+            let error = create_article_with_sources_using(
+                &root,
+                "导入应失败",
+                None,
+                &[
+                    screenshot_source([1, 2, 3, 255]),
+                    screenshot_source([4, 5, 6, 255]),
+                ],
+                |root, reference, sources| {
+                    let (path, _, _) = resolve_article_path(root, reference)?;
+                    fs::create_dir(path.join("images").join("002.png")).unwrap();
+                    import_validated_sources_at(root, reference, sources)
+                },
+            )
+            .expect_err("第二张图片写入必须失败");
+            assert!(matches!(
+                error.code.as_str(),
+                "IMAGE_DESTINATION_EXISTS" | "IO_ERROR"
+            ));
+            assert_eq!(
+                fs::read_dir(root.join(ARTICLES_DIR_NAME)).unwrap().count(),
+                1
+            );
+            assert!(Path::new(&previous.markdown_path).is_file());
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.expect("新建资料导入失败应回滚整个新文件夹");
+    }
+
+    #[test]
+    fn rejects_corrupted_path_images_and_too_many_sources_before_creation() {
+        let root = temporary_library_root("source-limits");
+        fs::create_dir_all(&root).unwrap();
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let corrupt = root.join("corrupt.png");
+            fs::write(&corrupt, b"not an image").unwrap();
+            assert!(create_article_with_sources_at(
+                &root,
+                "损坏图片",
+                None,
+                &[ImageSource::Path {
+                    path: path_to_string(&corrupt)?
+                },]
+            )
+            .is_err());
+            let sources = (0..51)
+                .map(|_| screenshot_source([1, 2, 3, 255]))
+                .collect::<Vec<_>>();
+            let error =
+                create_article_with_sources_at(&root, "太多图片", None, &sources).unwrap_err();
+            assert_eq!(error.code, "TOO_MANY_IMAGES");
+            assert_eq!(
+                fs::read_dir(root.join(ARTICLES_DIR_NAME)).unwrap().count(),
+                0
+            );
+            // An article with no images remains supported for manual text entry.
+            assert!(create_article_with_sources_at(&root, "纯文字", None, &[])?
+                .images
+                .images
+                .is_empty());
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.expect("图片数量与文件内容校验应在新建资料前完成");
+    }
+
+    #[test]
+    fn exclusive_image_write_never_replaces_an_existing_file() {
+        let root = temporary_library_root("exclusive-image");
+        fs::create_dir_all(&root).unwrap();
+        let destination = root.join("001.png");
+        fs::write(&destination, "original").unwrap();
+        let result = write_imported_image(&ValidatedImageData::Bytes(vec![1, 2, 3]), &destination);
+        let preserved = fs::read_to_string(&destination).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        assert_eq!(result.unwrap_err().code, "IMAGE_DESTINATION_EXISTS");
+        assert_eq!(preserved, "original");
     }
 
     #[test]

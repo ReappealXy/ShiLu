@@ -51,7 +51,7 @@ pub fn setup<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
     Ok(())
 }
 
-fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
+pub(crate) fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         if let Err(error) = window.show() {
             eprintln!("Unable to show ShiLu window: {error}");

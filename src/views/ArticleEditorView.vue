@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowLeft, Check, Eye, FileText, LoaderCircle, ScanText, Save, SquarePen } from "@lucide/vue";
+import { ArrowLeft, Check, ClipboardPaste, Eye, FileText, LoaderCircle, ScanText, Save, SquarePen, X } from "@lucide/vue";
+import { isTauri } from "@tauri-apps/api/core";
 import { useRoute, useRouter } from "vue-router";
 import { getErrorMessage } from "../services/library";
 import { ocrArticleImages, readArticle, saveArticle, type ArticleDocument } from "../services/editor";
+import { importArticleSources } from "../services/capture";
+import { hasPastedText, imageFromBlob, pastedImageFiles, readClipboardImages, type ClipboardImage } from "../services/clipboard";
 
 const route = useRoute();
 const router = useRouter();
@@ -23,6 +26,14 @@ const errorMessage = ref("");
 const successMessage = ref("");
 const ocrText = ref("");
 const ocrRunning = ref(false);
+const pendingImages = ref<ClipboardImage[]>([]);
+const pendingAdds = ref(0);
+const appendingImages = ref(false);
+const clipboardError = ref("");
+const clipboardSuccess = ref("");
+const imageQueueLocked = computed(() => loading.value || pendingAdds.value > 0 || appendingImages.value || ocrRunning.value);
+let imageQueue = Promise.resolve();
+let disposed = false;
 let loaded = false;
 let saveTimer: ReturnType<typeof window.setTimeout> | undefined;
 
@@ -116,6 +127,7 @@ async function persistArticle(showFeedback = true) {
 }
 
 async function runOcr() {
+  if (imageQueueLocked.value || pendingImages.value.length) return;
   ocrRunning.value = true;
   errorMessage.value = "";
   try {
@@ -134,6 +146,58 @@ function insertOcrText() {
   dirty.value = true;
 }
 
+function queueClipboardImages(load: () => Promise<ClipboardImage[]>) {
+  if (loading.value || appendingImages.value || ocrRunning.value || disposed || !article.value) return;
+  pendingAdds.value++;
+  clipboardError.value = "";
+  clipboardSuccess.value = "";
+  const result = load().then((items) => ({ items }), (error: unknown) => ({ error }));
+  imageQueue = imageQueue.then(async () => {
+    const outcome = await result;
+    if (disposed) return;
+    if ("error" in outcome) clipboardError.value = getErrorMessage(outcome.error, "无法粘贴图片，请重新截图后再试。");
+    else pendingImages.value.push(...outcome.items);
+  }).finally(() => { pendingAdds.value--; });
+}
+
+function pasteImages() {
+  queueClipboardImages(readClipboardImages);
+}
+
+function onPaste(event: ClipboardEvent) {
+  const files = pastedImageFiles(event);
+  if (files.length) {
+    event.preventDefault();
+    queueClipboardImages(() => Promise.all(files.map(imageFromBlob)));
+  } else if (!hasPastedText(event) && isTauri()) {
+    event.preventDefault();
+    pasteImages();
+  }
+}
+
+function removePendingImage(index: number) {
+  if (!imageQueueLocked.value) pendingImages.value.splice(index, 1);
+}
+
+async function appendImages() {
+  if (imageQueueLocked.value || !pendingImages.value.length || !article.value) return;
+  appendingImages.value = true;
+  clipboardError.value = "";
+  clipboardSuccess.value = "";
+  try {
+    const result = await importArticleSources(articleReference.value, pendingImages.value.map((image) => image.source));
+    if (disposed) return;
+    pendingImages.value = [];
+    ocrText.value = "";
+    clipboardSuccess.value = `已追加 ${result.images.length} 张图片，可手动识别文字。`;
+    // Do not reload the document: the editor may contain unsaved text.
+  } catch (error) {
+    if (!disposed) clipboardError.value = getErrorMessage(error, "保存图片失败，预览仍保留，请重试。");
+  } finally {
+    appendingImages.value = false;
+  }
+}
+
 function scheduleAutoSave() {
   if (!loaded) return;
   dirty.value = true;
@@ -149,8 +213,8 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 watch([title, summary, sourceUrl, tagsText, content, notes], scheduleAutoSave);
-onMounted(() => { window.addEventListener("keydown", onKeydown); void loadArticle(); });
-onBeforeUnmount(() => { window.removeEventListener("keydown", onKeydown); if (saveTimer) window.clearTimeout(saveTimer); });
+onMounted(() => { window.addEventListener("keydown", onKeydown); window.addEventListener("paste", onPaste); void loadArticle(); });
+onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", onKeydown); window.removeEventListener("paste", onPaste); if (saveTimer) window.clearTimeout(saveTimer); });
 </script>
 
 <template>
@@ -175,7 +239,29 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKeydown); if (sa
         <label class="editor-field editor-notes-field"><span>我的备注</span><textarea v-model="notes" rows="4" placeholder="写下你的补充、待办或思考"></textarea></label>
         <p v-if="errorMessage" class="editor-feedback editor-feedback-error" role="alert">{{ errorMessage }}</p>
       </section>
-      <aside class="content-panel editor-meta"><p class="panel-kicker">DOCUMENT</p><h3>资料信息</h3><dl><div><dt>文件夹</dt><dd>{{ article?.folderName }}</dd></div><div><dt>创建时间</dt><dd>{{ article?.createdAt }}</dd></div><div><dt>最后修改</dt><dd>{{ article?.updatedAt }}</dd></div></dl><p class="editor-path">{{ article?.markdownPath }}</p><div class="editor-ocr"><div class="editor-ocr-heading"><span>本地 OCR</span><button class="icon-button" type="button" title="识别图片文字" aria-label="识别图片文字" :disabled="ocrRunning" @click="runOcr"><LoaderCircle v-if="ocrRunning" :size="15" class="editor-spin" /><ScanText v-else :size="15" /></button></div><p v-if="!ocrText">识别结果会保存在 raw/ocr.txt，不会自动覆盖正文。</p><pre v-else>{{ ocrText }}</pre><button v-if="ocrText" class="button button-secondary editor-ocr-insert" type="button" @click="insertOcrText">插入正文</button></div></aside>
+      <aside class="content-panel editor-meta">
+        <p class="panel-kicker">DOCUMENT</p><h3>资料信息</h3>
+        <dl><div><dt>文件夹</dt><dd>{{ article?.folderName }}</dd></div><div><dt>创建时间</dt><dd>{{ article?.createdAt }}</dd></div><div><dt>最后修改</dt><dd>{{ article?.updatedAt }}</dd></div></dl>
+        <p class="editor-path">{{ article?.markdownPath }}</p>
+        <section class="editor-images" aria-labelledby="editor-images-heading">
+          <h4 id="editor-images-heading">补充截图</h4>
+          <p>截图后按 Ctrl + V，确认追加后再识别文字。</p>
+          <button class="button button-secondary editor-paste-button" type="button" :disabled="imageQueueLocked" @click="pasteImages"><LoaderCircle v-if="pendingAdds" :size="15" class="editor-spin" /><ClipboardPaste v-else :size="15" />{{ pendingAdds ? "正在读取..." : "粘贴图片" }}</button>
+          <p v-if="pendingAdds" role="status">正在读取图片，请稍候。</p>
+          <ol v-if="pendingImages.length" class="editor-image-queue" aria-label="待追加的截图">
+            <li v-for="(image, index) in pendingImages" :key="image.source.name" class="editor-image-item">
+              <img :src="image.previewUrl" :alt="`待追加截图 ${index + 1}`" />
+              <span>截图 {{ index + 1 }}<small>{{ image.width }} × {{ image.height }}</small></span>
+              <button class="icon-button" type="button" :disabled="imageQueueLocked" :aria-label="`移除截图 ${index + 1}`" @click="removePendingImage(index)"><X :size="15" /></button>
+            </li>
+          </ol>
+          <p v-if="pendingImages.length">{{ pendingImages.length }} 张待追加，点击保存后存入当前资料。</p>
+          <button v-if="pendingImages.length" class="button button-primary editor-append-button" type="button" :disabled="imageQueueLocked" @click="appendImages"><LoaderCircle v-if="appendingImages" :size="15" class="editor-spin" /><Check v-else :size="15" />{{ appendingImages ? "正在保存..." : "保存图片" }}</button>
+          <p v-if="clipboardError" class="editor-image-error" role="alert">{{ clipboardError }}</p>
+          <p v-if="clipboardSuccess" class="editor-image-success" role="status">{{ clipboardSuccess }}</p>
+        </section>
+        <div class="editor-ocr"><div class="editor-ocr-heading"><span>本地 OCR</span><button class="icon-button" type="button" title="识别图片文字" aria-label="识别图片文字" :disabled="imageQueueLocked || pendingImages.length > 0" @click="runOcr"><LoaderCircle v-if="ocrRunning" :size="15" class="editor-spin" /><ScanText v-else :size="15" /></button></div><p v-if="pendingImages.length">先确认追加上方截图，再识别这条资料中的图片。</p><p v-else-if="!ocrText">识别结果会保存在 raw/ocr.txt，不会自动覆盖正文。</p><pre v-else>{{ ocrText }}</pre><button v-if="ocrText" class="button button-secondary editor-ocr-insert" type="button" @click="insertOcrText">插入正文</button></div>
+      </aside>
     </div>
   </section>
 </template>
@@ -222,6 +308,20 @@ onBeforeUnmount(() => { window.removeEventListener("keydown", onKeydown); if (sa
 .editor-meta dd { margin: 4px 0 0; overflow-wrap: anywhere; color: var(--ink); font-size: 12px; line-height: 1.45; }
 .editor-path { margin: 22px 0 0; padding-top: 14px; overflow-wrap: anywhere; color: var(--muted); border-top: 1px solid var(--line); font-size: 10px; line-height: 1.5; }
 .editor-ocr { margin-top: 22px; padding-top: 15px; border-top: 1px solid var(--line); }
+.editor-images { margin-top: 22px; padding-top: 15px; border-top: 1px solid var(--line); }
+.editor-images h4 { margin: 0; color: var(--ink); font-size: 12px; font-weight: 700; }
+.editor-images p { margin: 8px 0 10px; color: var(--muted-strong); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+.editor-paste-button, .editor-append-button { width: 100%; min-height: 34px; padding: 6px 8px; font-size: 11px; }
+.editor-append-button { margin-top: 10px; }
+.editor-images button:disabled { opacity: 0.55; cursor: default; }
+.editor-image-queue { display: flex; flex-direction: column; gap: 8px; max-height: 300px; margin: 12px 0 0; padding: 0; overflow-y: auto; list-style: none; }
+.editor-image-queue li { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.editor-image-queue img { display: block; width: 48px; height: 48px; flex: 0 0 48px; object-fit: contain; background: var(--surface-alt); border-radius: 6px; }
+.editor-image-queue span { flex: 1; min-width: 0; color: var(--ink); font-size: 11px; }
+.editor-image-queue small { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+.editor-image-queue .icon-button { width: 28px; height: 28px; flex-shrink: 0; }
+.editor-images .editor-image-error { color: oklch(0.55 0.17 25); }
+.editor-images .editor-image-success { color: var(--success); }
 .editor-ocr-heading { display: flex; align-items: center; justify-content: space-between; color: var(--ink); font-size: 12px; font-weight: 700; }
 .editor-ocr-heading .icon-button { width: 28px; height: 28px; }
 .editor-ocr p { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
