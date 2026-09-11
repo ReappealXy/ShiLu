@@ -78,8 +78,9 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
   background: transparent; border: 0; border-radius: 9px;
   transition: color 140ms ease-out, background-color 140ms ease-out, transform 140ms ease-out;
 }
-.brand-mark { width: 38px; height: 38px; color: oklch(1 0 0); background: var(--primary); }
-.brand-mark:hover { background: var(--primary-hover); }
+.brand-mark { width: 38px; height: 38px; overflow: hidden; background: white; }
+.brand-mark img { display: block; width: 38px; height: 38px; object-fit: contain; }
+.brand-mark:hover { outline: 1px solid var(--primary); outline-offset: 2px; }
 .icon-button:hover { color: var(--ink); background: var(--surface-alt); }
 .brand-mark:active, .icon-button:active, .button:active { transform: translateY(1px); }
 .brand-copy { display: grid; min-width: 0; overflow: hidden; line-height: 1.05; transition: opacity 130ms ease-out; }

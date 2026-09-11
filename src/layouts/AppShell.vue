@@ -2,7 +2,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
-  BookOpen,
   ChevronLeft,
   ChevronRight,
   Command,
@@ -311,7 +310,7 @@ onBeforeUnmount(() => {
     <aside class="sidebar" aria-label="主导航">
       <div class="brand-row">
         <button class="brand-mark" type="button" aria-label="拾录首页" title="拾录" @click="router.push('/overview')">
-          <BookOpen :size="19" stroke-width="2.4" />
+          <img src="/shilu-icon.png" alt="" width="38" height="38" draggable="false" />
         </button>
         <div class="brand-copy"><strong>拾录</strong><span>ShiLu</span></div>
         <button v-if="!sidebarCollapsed" class="icon-button sidebar-toggle" type="button" title="折叠侧边栏" aria-label="折叠侧边栏" @click="sidebarCollapsed = true">
