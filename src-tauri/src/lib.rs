@@ -1,4 +1,5 @@
 mod storage;
+mod tray;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -6,6 +7,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // Keep normal window closing available if the system tray cannot be created.
+            if let Err(error) = tray::setup(app) {
+                eprintln!("Unable to create ShiLu system tray: {error}");
+            }
+            Ok(())
+        })
+        .on_window_event(tray::on_window_event)
         .invoke_handler(tauri::generate_handler![
             storage::get_library_status,
             storage::initialize_library,

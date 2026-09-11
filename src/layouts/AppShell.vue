@@ -36,12 +36,12 @@ const toast = ref("");
 const wheelPosition = ref(0);
 const wheelSettled = ref(true);
 const reducedMotion = ref(false);
+const dragging = ref(false);
 let toastTimer: ReturnType<typeof window.setTimeout> | undefined;
-let activationTimer: ReturnType<typeof window.setTimeout> | undefined;
 let snapTimer: ReturnType<typeof window.setTimeout> | undefined;
 let dragStartY: number | undefined;
 let dragStartPosition: number | undefined;
-let didDrag = false;
+let dragPointerId: number | undefined;
 let suppressClickUntil = 0;
 let reducedMotionQuery: MediaQueryList | undefined;
 
@@ -96,46 +96,37 @@ function isNavItemAtBaseline(index: number) {
 }
 
 function settleOnNavItem(index: number) {
+  cancelWheelSnap();
   wheelPosition.value = nearestWheelPosition(index);
   wheelSettled.value = true;
 }
 
 function moveWheel(delta: number) {
-  if (activationTimer) window.clearTimeout(activationTimer);
-  wheelPosition.value = clampNavIndex(Math.round(wheelPosition.value) + delta);
-  wheelSettled.value = true;
+  settleOnNavItem(Math.round(wheelPosition.value) + delta);
 }
 
 function snapWheel() {
-  wheelPosition.value = clampNavIndex(Math.round(wheelPosition.value));
-  wheelSettled.value = true;
+  settleOnNavItem(Math.round(wheelPosition.value));
+}
+
+function cancelWheelSnap() {
+  if (snapTimer) window.clearTimeout(snapTimer);
   snapTimer = undefined;
 }
 
 function scheduleWheelSnap() {
-  if (snapTimer) window.clearTimeout(snapTimer);
-  snapTimer = window.setTimeout(snapWheel, 130);
+  cancelWheelSnap();
+  // Finish one wheel gesture before routing so touchpad events cannot fight the route sync.
+  snapTimer = window.setTimeout(() => {
+    snapWheel();
+    if (!isNavItemCurrent(commands[selectedNavIndex.value])) activateNavItem();
+  }, 130);
 }
 
 function activateNavItem(index = selectedNavIndex.value) {
   const nextIndex = clampNavIndex(index);
-  if (activationTimer) window.clearTimeout(activationTimer);
-
-  if (reducedMotion.value || sidebarCollapsed.value) {
-    settleOnNavItem(nextIndex);
-    navigate(commands[nextIndex]);
-    return;
-  }
-
-  const alreadyAtBaseline = isNavItemAtBaseline(nextIndex);
-  wheelSettled.value = false;
-  wheelPosition.value = nearestWheelPosition(nextIndex);
-  const delay = alreadyAtBaseline ? 0 : 200;
-  activationTimer = window.setTimeout(() => {
-    wheelSettled.value = true;
-    navigate(commands[nextIndex]);
-    activationTimer = undefined;
-  }, delay);
+  settleOnNavItem(nextIndex);
+  navigate(commands[nextIndex]);
 }
 
 function navItemStyle(index: number) {
@@ -156,11 +147,11 @@ function navItemStyle(index: number) {
 }
 
 function onNavWheel(event: WheelEvent) {
-  if (reducedMotion.value || sidebarCollapsed.value) return;
-  if (event.ctrlKey || event.deltaY === 0) return;
+  if (event.ctrlKey || event.deltaY === 0 || dragPointerId !== undefined) return;
   event.preventDefault();
-  if (activationTimer) window.clearTimeout(activationTimer);
-  const pixels = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * 16 : event.deltaY;
+  const unit = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? (event.currentTarget as HTMLElement).clientHeight : 1;
+  const pixels = event.deltaY * unit;
   const movement = Math.max(-0.72, Math.min(0.72, pixels / 120));
   wheelSettled.value = false;
   wheelPosition.value = Math.max(0, Math.min(commands.length - 1, wheelPosition.value + movement));
@@ -169,32 +160,46 @@ function onNavWheel(event: WheelEvent) {
 
 function onNavPointerDown(event: PointerEvent) {
   if (reducedMotion.value || sidebarCollapsed.value) return;
-  if (event.pointerType === "mouse" && event.button !== 0) return;
-  if (activationTimer) window.clearTimeout(activationTimer);
+  if (!event.isPrimary || (event.pointerType === "mouse" && event.button !== 0)) return;
+  cancelWheelSnap();
+  dragPointerId = event.pointerId;
   dragStartY = event.clientY;
   dragStartPosition = wheelPosition.value;
-  didDrag = false;
-  (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+  dragging.value = false;
 }
 
 function onNavPointerMove(event: PointerEvent) {
-  if (dragStartY === undefined || dragStartPosition === undefined) return;
+  if (event.pointerId !== dragPointerId || dragStartY === undefined || dragStartPosition === undefined) return;
+  if (event.pointerType === "mouse" && !(event.buttons & 1)) {
+    onNavPointerUp(event);
+    return;
+  }
   const delta = event.clientY - dragStartY;
-  if (Math.abs(delta) > 5) didDrag = true;
-  if (!didDrag) return;
+  if (!dragging.value && Math.abs(delta) > 5) {
+    dragging.value = true;
+    // Capturing on pointerdown retargets ordinary button clicks to the nav container.
+    (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+  }
+  if (!dragging.value) return;
   wheelSettled.value = false;
   wheelPosition.value = Math.max(0, Math.min(commands.length - 1, dragStartPosition - delta / 82));
 }
 
 function onNavPointerUp(event: PointerEvent) {
-  const wasDragging = didDrag;
+  if (event.pointerId !== dragPointerId) return;
+  const wasDragging = dragging.value;
   if (dragStartY !== undefined) snapWheel();
   dragStartY = undefined;
   dragStartPosition = undefined;
+  dragPointerId = undefined;
   const target = event.currentTarget as HTMLElement;
   if (target.hasPointerCapture?.(event.pointerId)) target.releasePointerCapture(event.pointerId);
   if (wasDragging) suppressClickUntil = Date.now() + 250;
-  didDrag = false;
+  dragging.value = false;
+}
+
+function onNavPointerLeave(event: PointerEvent) {
+  if (!dragging.value) onNavPointerUp(event);
 }
 
 function onNavKeydown(event: KeyboardEvent) {
@@ -232,8 +237,7 @@ function updateReducedMotion() {
 }
 
 watch(() => route.path, (path) => {
-  if (activationTimer) window.clearTimeout(activationTimer);
-  activationTimer = undefined;
+  cancelWheelSnap();
   syncSelectedNavItem(path);
 }, { immediate: true });
 
@@ -298,8 +302,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
   reducedMotionQuery?.removeEventListener?.("change", updateReducedMotion);
   if (toastTimer) window.clearTimeout(toastTimer);
-  if (activationTimer) window.clearTimeout(activationTimer);
-  if (snapTimer) window.clearTimeout(snapTimer);
+  cancelWheelSnap();
 });
 </script>
 
@@ -318,13 +321,15 @@ onBeforeUnmount(() => {
 
       <nav
         class="side-nav arc-nav"
-        :class="{ 'arc-nav-reduced': reducedMotion, 'arc-nav-dragging': dragStartY !== undefined }"
+        :class="{ 'arc-nav-reduced': reducedMotion, 'arc-nav-dragging': dragging }"
         aria-label="主导航"
         @wheel="onNavWheel"
         @pointerdown="onNavPointerDown"
         @pointermove="onNavPointerMove"
         @pointerup="onNavPointerUp"
         @pointercancel="onNavPointerUp"
+        @lostpointercapture="onNavPointerUp"
+        @pointerleave="onNavPointerLeave"
         @keydown="onNavKeydown"
       >
         <span class="arc-nav-orbit" aria-hidden="true" />
