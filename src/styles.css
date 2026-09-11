@@ -207,14 +207,17 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .storage-track i { display: block; width: 30%; height: 100%; background: var(--primary); border-radius: inherit; }
 .expand-button { margin: 0 auto; }
 .sidebar-is-collapsed .brand-row { grid-template-columns: 38px; justify-content: center; }
-.sidebar-is-collapsed .brand-copy, .sidebar-is-collapsed .sidebar-toggle, .sidebar-is-collapsed .nav-item .arc-nav-label, .sidebar-is-collapsed .storage-mini { opacity: 0; pointer-events: none; }
+.sidebar-is-collapsed .brand-copy, .sidebar-is-collapsed .sidebar-toggle, .sidebar-is-collapsed .nav-item .arc-nav-label, .sidebar-is-collapsed .storage-mini { display: none; }
 .sidebar-is-collapsed .nav-item { justify-content: center; padding: 0; }
 .app-shell.sidebar-is-collapsed .sidebar { padding-right: 8px; padding-left: 8px; }
 .app-shell.sidebar-is-collapsed .arc-nav {
-  display: grid;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
   min-height: auto;
-  gap: 4px;
-  margin-top: 22px;
+  gap: 8px;
+  margin-top: 24px;
   padding: 0;
   touch-action: auto;
   user-select: auto;
@@ -222,7 +225,10 @@ button:focus-visible, a:focus-visible, input:focus-visible { outline: 3px solid 
 .app-shell.sidebar-is-collapsed .arc-nav-orbit, .app-shell.sidebar-is-collapsed .arc-nav-baseline { display: none; }
 .app-shell.sidebar-is-collapsed .arc-nav-item {
   position: static;
-  width: 100%;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  gap: 0;
   filter: none;
   transform: none;
   opacity: 1;

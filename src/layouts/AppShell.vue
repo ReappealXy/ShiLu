@@ -341,6 +341,7 @@ onBeforeUnmount(() => {
           :style="navItemStyle(index)"
           type="button"
           :title="item.description"
+          :aria-label="item.label"
           :data-nav-index="index"
           :tabindex="index === selectedNavIndex ? 0 : -1"
           :aria-selected="index === selectedNavIndex"

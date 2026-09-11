@@ -127,9 +127,104 @@ async function check(name, run) {
     results.push({ name, status: "PASS", detail });
     console.log(`PASS ${name}${detail ? ` ${JSON.stringify(detail)}` : ""}`);
   } catch (error) {
-    results.push({ name, status: "FAIL", error: error.message });
-    console.error(`FAIL ${name}: ${error.message}`);
+    const image = await captureScreenshot(`navigation-failure-${results.length + 1}`).catch(() => null);
+    results.push({ name, status: "FAIL", error: error.message, image });
+    console.error(`FAIL ${name}: ${error.message}${image ? ` Screenshot: ${image}` : ""}`);
   }
+}
+
+async function captureScreenshot(name) {
+  const image = await command("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
+  const imagePath = path.join(outputDirectory, `${name}.png`);
+  await writeFile(imagePath, Buffer.from(image.data, "base64"));
+  return imagePath;
+}
+
+async function setCollapsed(collapsed) {
+  if ((await state()).collapsed !== collapsed) {
+    await click(`button[aria-label="${collapsed ? "折叠侧边栏" : "展开侧边栏"}"]`);
+    await until(async () => (await state()).collapsed === collapsed, `sidebar collapsed=${collapsed}`);
+    await pause(280);
+  }
+}
+
+async function setTheme(theme) {
+  if (await evaluate(`document.documentElement.dataset.theme !== ${JSON.stringify(theme)}`)) {
+    await click(`button[aria-label="切换${theme === "dark" ? "深色" : "浅色"}主题"]`);
+    await until(() => evaluate(`document.documentElement.dataset.theme === ${JSON.stringify(theme)}`), `${theme} theme`);
+    await pause(160);
+  }
+}
+
+async function collapsedGeometry() {
+  const layout = await evaluate(`(() => {
+    const rect = element => {
+      const r = element.getBoundingClientRect();
+      return { left: r.left, right: r.right, top: r.top, bottom: r.bottom,
+        width: r.width, height: r.height, centerX: r.left + r.width / 2, centerY: r.top + r.height / 2 };
+    };
+    const sidebar = document.querySelector('.sidebar');
+    const brandCopy = document.querySelector('.brand-copy');
+    return {
+      viewport: { width: innerWidth, height: innerHeight, deviceScaleFactor: devicePixelRatio },
+      theme: document.documentElement.dataset.theme,
+      collapsed: document.querySelector('.app-shell').classList.contains('sidebar-is-collapsed'),
+      documentWidth: document.documentElement.scrollWidth,
+      sidebar: rect(sidebar), brand: rect(document.querySelector('.brand-row')),
+      brandMark: rect(document.querySelector('.brand-mark')),
+      brandCopy: { ...rect(brandCopy), display: getComputedStyle(brandCopy).display },
+      nav: rect(document.querySelector('.arc-nav')), bottom: rect(document.querySelector('.sidebar-bottom')),
+      expand: rect(document.querySelector('.expand-button')),
+      items: [...document.querySelectorAll('.arc-nav-item')].map(element => {
+        const label = element.querySelector('.arc-nav-label');
+        return { ...rect(element), icon: rect(element.querySelector('.arc-nav-icon')),
+          transform: getComputedStyle(element).transform,
+          label: { ...rect(label), display: getComputedStyle(label).display, text: label.textContent.trim() },
+          accessibleName: element.getAttribute('aria-label') };
+      })
+    };
+  })()`);
+  const near = (actual, expected, message) => assert.ok(Math.abs(actual - expected) <= 1,
+    `${message}: expected ${expected}, received ${actual}`);
+  assert.equal(layout.collapsed, true, "geometry check requires a collapsed sidebar");
+  assert.equal(layout.items.length, 4, "all four navigation entries must remain visible");
+  near(layout.brand.height, 44, "brand row must not have hidden grid rows");
+  assert.equal(layout.brandCopy.display, "none", "hidden brand text must not reserve layout space");
+  near(layout.brandCopy.width, 0, "hidden brand text width");
+  near(layout.brandCopy.height, 0, "hidden brand text height");
+  near(layout.brandMark.centerX, layout.sidebar.centerX, "brand is centered in sidebar");
+  near(layout.nav.top - layout.brand.bottom, 24, "fixed space below brand");
+  near(layout.nav.height, 4 * 44 + 3 * 8, "navigation must not stretch to fill sidebar");
+  for (const [index, item] of layout.items.entries()) {
+    near(item.width, 44, `entry ${index} width`);
+    near(item.height, 44, `entry ${index} height`);
+    near(item.centerX, layout.sidebar.centerX, `entry ${index} centered in sidebar`);
+    near(item.icon.centerX, item.centerX, `entry ${index} icon horizontally centered`);
+    near(item.icon.centerY, item.centerY, `entry ${index} icon vertically centered`);
+    assert.equal(item.transform, "none", `entry ${index} must not retain arc transforms`);
+    assert.equal(item.label.display, "none", `entry ${index} text must not reserve layout space`);
+    near(item.label.width, 0, `entry ${index} hidden label width`);
+    near(item.label.height, 0, `entry ${index} hidden label height`);
+    assert.equal(item.accessibleName, item.label.text, `entry ${index} keeps its accessible name`);
+    if (index > 0) near(item.top - layout.items[index - 1].bottom, 8, `gap before entry ${index}`);
+    assert.ok(item.top >= layout.nav.top - 1 && item.bottom <= layout.nav.bottom + 1,
+      `entry ${index} must not be vertically clipped`);
+  }
+  near(layout.expand.centerX, layout.sidebar.centerX, "expand control centered in sidebar");
+  near(layout.sidebar.bottom - layout.expand.bottom, 12, "expand control remains anchored at bottom");
+  assert.ok(layout.nav.bottom <= layout.bottom.top, "navigation does not overlap expand control");
+  assert.ok(layout.documentWidth <= layout.viewport.width, "collapsed layout must not overflow horizontally");
+  return layout;
+}
+
+async function collapsedScreenshot({ width, height, deviceScaleFactor = 1 }, theme) {
+  await command("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor, mobile: false });
+  await navigate("overview");
+  await setTheme(theme);
+  await setCollapsed(true);
+  const image = await captureScreenshot(`navigation-collapsed-${width}x${height}-${deviceScaleFactor}x-${theme}`);
+  const layout = await collapsedGeometry();
+  return { image, viewport: layout.viewport, theme, button: "44 x 44", gap: 8, brandHeight: layout.brand.height };
 }
 
 async function screenshot(width, height) {
@@ -156,9 +251,7 @@ async function screenshot(width, height) {
       })
     };
   })()`);
-  const image = await command("Page.captureScreenshot", { format: "png", captureBeyondViewport: false });
-  const imagePath = path.join(outputDirectory, `navigation-regression-${width}x${height}.png`);
-  await writeFile(imagePath, Buffer.from(image.data, "base64"));
+  const imagePath = await captureScreenshot(`navigation-regression-${width}x${height}`);
   assert.ok(layout.documentWidth <= width, `document horizontal overflow: ${JSON.stringify(layout)}`);
   assert.ok(layout.contentWidth <= layout.contentClientWidth + 1, `content horizontal overflow: ${JSON.stringify(layout)}`);
   assert.ok(layout.sidebar.right <= layout.workspace.left + 1, "sidebar overlaps workspace");
@@ -277,15 +370,58 @@ try {
     return { dragged, confirmed: await expectRoute("library", 1) };
   });
 
-  await check("collapsed icon navigation remains mouse-clickable", async () => {
+  await check("collapsed navigation: every icon is centered and mouse-clickable", async () => {
     await navigate();
-    await click('button[aria-label="折叠侧边栏"]');
-    await pause(260);
-    assert.equal((await state()).collapsed, true);
-    const transforms = await evaluate(`[...document.querySelectorAll('.arc-nav-item')].map(el => getComputedStyle(el).transform)`);
-    assert.deepEqual(transforms, ["none", "none", "none", "none"]);
-    await clickNav(2);
-    return expectRoute("capture", 2);
+    await setCollapsed(true);
+    await collapsedGeometry();
+    const visited = [];
+    for (const [index, route] of ["overview", "library", "capture", "settings"].entries()) {
+      await clickNav(index);
+      visited.push(await expectRoute(route, index));
+      await collapsedGeometry();
+    }
+    return { visited };
+  });
+
+  await check("collapsed navigation: wheel changes pages immediately", async () => {
+    await navigate();
+    await setCollapsed(true);
+    const visited = [];
+    for (const [index, route] of [[1, "library"], [2, "capture"], [3, "settings"]]) {
+      await wheel(120);
+      visited.push(await expectRoute(route, index));
+      await pause(280);
+    }
+    await wheel(-120);
+    visited.push(await expectRoute("capture", 2));
+    await collapsedGeometry();
+    return { visited };
+  });
+
+  await check("repeated collapse/expand preserves compact and arc layouts", async () => {
+    await navigate("library");
+    const expandedGeometry = () => evaluate(`[...document.querySelectorAll('.arc-nav-item')].map(element => {
+      const r = element.getBoundingClientRect();
+      return { left: r.left, top: r.top, width: r.width, height: r.height };
+    })`);
+    const initial = await expandedGeometry();
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await setCollapsed(true);
+      await collapsedGeometry();
+      await expectRoute("library", 1);
+      await setCollapsed(false);
+      const restored = await expandedGeometry();
+      for (const [index, item] of restored.entries()) {
+        for (const property of ["left", "top", "width", "height"]) {
+          assert.ok(Math.abs(item[property] - initial[index][property]) <= 1,
+            `cycle ${cycle + 1}, arc entry ${index} ${property} was not restored`);
+        }
+      }
+      assert.ok(await evaluate(`!!document.querySelector('.brand-copy').getBoundingClientRect().width`),
+        "brand text must return after expanding");
+      await expectRoute("library", 1);
+    }
+    return { cycles: 3, image: await captureScreenshot("navigation-expanded-after-collapse-cycles") };
   });
 
   await check("reduced-motion navigation remains mouse-clickable", async () => {
@@ -295,7 +431,12 @@ try {
       assert.equal((await state()).collapsed, false);
       assert.ok(await evaluate(`document.querySelector('.arc-nav').classList.contains('arc-nav-reduced')`));
       await clickNav(3);
-      return await expectRoute("settings", 3);
+      const expanded = await expectRoute("settings", 3);
+      await setCollapsed(true);
+      await collapsedGeometry();
+      await clickNav(1);
+      const collapsed = await expectRoute("library", 1);
+      return { expanded, collapsed, image: await captureScreenshot("navigation-collapsed-reduced-motion") };
     } finally {
       await command("Emulation.setEmulatedMedia", { features: [] });
     }
@@ -310,6 +451,18 @@ try {
 
   await check("1440 x 900 screenshot and shell geometry", () => screenshot(1440, 900));
   await check("1100 x 680 screenshot and shell geometry", () => screenshot(1100, 680));
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1100, height: 680 },
+    { width: 1920, height: 1080 },
+    // 1650 x 1020 physical pixels at Windows 150% maps to a 1100 x 680 CSS viewport.
+    { width: 1100, height: 680, deviceScaleFactor: 1.5 },
+  ]) {
+    for (const theme of ["light", "dark"]) {
+      await check(`collapsed ${viewport.width} x ${viewport.height} @ ${viewport.deviceScaleFactor ?? 1}x ${theme}`,
+        () => collapsedScreenshot(viewport, theme));
+    }
+  }
   await check("no uncaught JavaScript exceptions", async () => assert.deepEqual(exceptions, []));
 } catch (error) {
   results.push({ name: "test infrastructure", status: "FAIL", error: error.stack });
