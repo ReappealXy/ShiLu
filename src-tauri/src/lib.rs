@@ -1,5 +1,8 @@
 mod storage;
 mod tray;
+mod window_state;
+
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -7,10 +10,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(window_state::plugin())
         .setup(|app| {
             // Keep normal window closing available if the system tray cannot be created.
             if let Err(error) = tray::setup(app) {
                 eprintln!("Unable to create ShiLu system tray: {error}");
+            }
+            // Restore geometry before the first visible frame.
+            if let Some(window) = app.get_webview_window("main") {
+                window.show()?;
+                window.set_focus()?;
             }
             Ok(())
         })

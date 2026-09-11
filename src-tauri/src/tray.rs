@@ -28,7 +28,10 @@ pub fn setup<R: Runtime>(app: &App<R>) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             OPEN_MENU_ID => restore_main_window(app),
             // Exiting the app bypasses the window-close-to-tray behavior.
-            EXIT_MENU_ID => app.exit(0),
+            EXIT_MENU_ID => {
+                crate::window_state::save(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -64,8 +67,12 @@ fn restore_main_window<R: Runtime>(app: &AppHandle<R>) {
 
 pub fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
     if let WindowEvent::CloseRequested { api, .. } = event {
-        if window.label() == MAIN_WINDOW_LABEL && window.app_handle().tray_by_id(TRAY_ID).is_some()
-        {
+        if window.label() != MAIN_WINDOW_LABEL {
+            return;
+        }
+        // Closing to tray is not an app exit, so persist before hiding the window.
+        crate::window_state::save(window.app_handle());
+        if window.app_handle().tray_by_id(TRAY_ID).is_some() {
             // Only cancel closing after hiding succeeds and a restore entry is available.
             // Do not intercept app ExitRequested events (including explicit/system exits).
             match window.hide() {
