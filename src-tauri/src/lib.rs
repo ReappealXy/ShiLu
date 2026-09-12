@@ -1,4 +1,5 @@
 mod clipboard;
+mod model;
 mod storage;
 mod tray;
 mod window_state;
@@ -44,7 +45,13 @@ pub fn run() {
             storage::list_articles,
             storage::ocr_article_images,
             storage::get_app_settings,
-            storage::set_theme_preference
+            storage::set_theme_preference,
+            model::save_model_settings,
+            model::fetch_model_list,
+            model::test_model,
+            model::ocr_with_model,
+            model::ocr_article_with_model,
+            model::polish_with_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running ShiLu application");

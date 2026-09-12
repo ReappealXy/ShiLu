@@ -162,17 +162,23 @@ pub struct OcrResult {
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LibraryConfig {
+pub(crate) struct LibraryConfig {
     #[serde(alias = "library_path")]
     library_path: Option<String>,
     #[serde(default = "default_theme")]
-    theme: String,
+    pub(crate) theme: String,
+    #[serde(default)]
+    pub ocr_model: Option<crate::model::ModelConfig>,
+    #[serde(default)]
+    pub polish_model: Option<crate::model::ModelConfig>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
     pub theme: String,
+    pub ocr_model: Option<crate::model::ModelConfig>,
+    pub polish_model: Option<crate::model::ModelConfig>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,6 +223,8 @@ pub fn get_app_settings(app: AppHandle) -> StorageResult<AppSettings> {
     let config = read_app_config(&config_path)?;
     Ok(AppSettings {
         theme: config.theme,
+        ocr_model: config.ocr_model,
+        polish_model: config.polish_model,
     })
 }
 
@@ -227,7 +235,11 @@ pub fn set_theme_preference(app: AppHandle, theme: String) -> StorageResult<AppS
     let mut config = read_app_config(&config_path)?;
     config.theme = theme.clone();
     write_json_atomic(&config_path, &config)?;
-    Ok(AppSettings { theme })
+    Ok(AppSettings {
+        theme,
+        ocr_model: config.ocr_model,
+        polish_model: config.polish_model,
+    })
 }
 
 #[tauri::command]
@@ -405,7 +417,7 @@ pub fn ocr_article_images(app: AppHandle, article_reference: String) -> StorageR
     ocr_article_images_at(&root, &article_reference)
 }
 
-fn app_config_path(app: &AppHandle) -> StorageResult<PathBuf> {
+pub(crate) fn app_config_path(app: &AppHandle) -> StorageResult<PathBuf> {
     let config_dir = app.path().app_config_dir().map_err(|error| {
         StorageError::new(
             "APP_CONFIG_UNAVAILABLE",
@@ -433,11 +445,13 @@ fn read_library_config(config_path: &Path) -> StorageResult<Option<String>> {
     Ok(Some(library_path))
 }
 
-fn read_app_config(config_path: &Path) -> StorageResult<LibraryConfig> {
+pub(crate) fn read_app_config(config_path: &Path) -> StorageResult<LibraryConfig> {
     if !config_path.exists() {
         return Ok(LibraryConfig {
             library_path: None,
             theme: default_theme(),
+            ocr_model: None,
+            polish_model: None,
         });
     }
     let content = fs::read_to_string(config_path)
@@ -462,7 +476,7 @@ fn normalize_theme(theme: &str) -> StorageResult<String> {
     }
 }
 
-fn configured_ready_library(app: &AppHandle) -> StorageResult<PathBuf> {
+pub(crate) fn configured_ready_library(app: &AppHandle) -> StorageResult<PathBuf> {
     let config_path = app_config_path(app)?;
     let Some(library_path) = read_library_config(&config_path)? else {
         return Err(StorageError::new(
@@ -907,7 +921,7 @@ fn import_validated_sources_at(
     })
 }
 
-fn resolve_article_path(
+pub(crate) fn resolve_article_path(
     root: &Path,
     article_reference: &str,
 ) -> StorageResult<(PathBuf, String, String)> {
@@ -1452,7 +1466,11 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> StorageResult<()> 
     write_bytes_atomic(path, &content)
 }
 
-fn write_text_atomic(path: &Path, content: &str) -> StorageResult<()> {
+pub(crate) fn write_app_config(path: &Path, config: &LibraryConfig) -> StorageResult<()> {
+    write_json_atomic(path, config)
+}
+
+pub(crate) fn write_text_atomic(path: &Path, content: &str) -> StorageResult<()> {
     write_bytes_atomic(path, content.as_bytes())
 }
 
@@ -1964,6 +1982,8 @@ mod tests {
                 &LibraryConfig {
                     library_path: Some("C:\\Users\\Example\\Documents\\ShiLuData".to_string()),
                     theme: default_theme(),
+                    ocr_model: None,
+                    polish_model: None,
                 },
             )?;
             let mut config = read_app_config(&config_path)?;

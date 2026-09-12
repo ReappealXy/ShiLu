@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowLeft, Check, ClipboardPaste, Eye, FileText, LoaderCircle, ScanText, Save, SquarePen, X } from "@lucide/vue";
+import { ArrowLeft, Check, ClipboardPaste, Eye, FileText, LoaderCircle, ScanText, Save, Sparkles, SquarePen, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { useRoute, useRouter } from "vue-router";
 import { getErrorMessage } from "../services/library";
-import { ocrArticleImages, readArticle, saveArticle, type ArticleDocument } from "../services/editor";
+import { readArticle, saveArticle, type ArticleDocument } from "../services/editor";
+import { getModelSettings, ocrArticleWithModel, polishWithModel } from "../services/model";
 import { importArticleSources } from "../services/capture";
 import { hasPastedText, imageFromBlob, pastedImageFiles, readClipboardImages, type ClipboardImage } from "../services/clipboard";
 
@@ -26,6 +27,8 @@ const errorMessage = ref("");
 const successMessage = ref("");
 const ocrText = ref("");
 const ocrRunning = ref(false);
+const polishText = ref("");
+const polishRunning = ref(false);
 const pendingImages = ref<ClipboardImage[]>([]);
 const pendingAdds = ref(0);
 const appendingImages = ref(false);
@@ -131,13 +134,35 @@ async function runOcr() {
   ocrRunning.value = true;
   errorMessage.value = "";
   try {
-    const result = await ocrArticleImages(articleReference.value);
+    const result = await ocrArticleWithModel(articleReference.value);
     ocrText.value = result.text;
     successMessage.value = `已读取 ${result.imageCount} 张图片的文字`;
     window.setTimeout(() => { successMessage.value = ""; }, 2200);
   } catch (error) {
-    errorMessage.value = getErrorMessage(error, "本地 OCR 失败，请确认资料中有图片。");
+    errorMessage.value = getErrorMessage(error, "OCR 失败，请先在设置中配置可用的 OCR 模型。");
   } finally { ocrRunning.value = false; }
+}
+
+async function runPolish() {
+  if (imageQueueLocked.value || !ocrText.value || polishRunning.value) return;
+  polishRunning.value = true;
+  errorMessage.value = "";
+  try {
+    const settings = await getModelSettings();
+    const config = settings.polishModel;
+    if (!config?.enabled) throw new Error("请先在设置中启用并保存文案润色模型。");
+    polishText.value = await polishWithModel(config, ocrText.value);
+    successMessage.value = "文案润色完成，请确认后再插入正文。";
+    window.setTimeout(() => { successMessage.value = ""; }, 2400);
+  } catch (error) {
+    errorMessage.value = getErrorMessage(error, "润色失败，请检查润色模型配置。");
+  } finally { polishRunning.value = false; }
+}
+
+function insertPolishedText() {
+  if (!polishText.value) return;
+  content.value = content.value.trim() ? `${content.value.trim()}\n\n${polishText.value}` : polishText.value;
+  dirty.value = true;
 }
 
 function insertOcrText() {
@@ -260,7 +285,7 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
           <p v-if="clipboardError" class="editor-image-error" role="alert">{{ clipboardError }}</p>
           <p v-if="clipboardSuccess" class="editor-image-success" role="status">{{ clipboardSuccess }}</p>
         </section>
-        <div class="editor-ocr"><div class="editor-ocr-heading"><span>本地 OCR</span><button class="icon-button" type="button" title="识别图片文字" aria-label="识别图片文字" :disabled="imageQueueLocked || pendingImages.length > 0" @click="runOcr"><LoaderCircle v-if="ocrRunning" :size="15" class="editor-spin" /><ScanText v-else :size="15" /></button></div><p v-if="pendingImages.length">先确认追加上方截图，再识别这条资料中的图片。</p><p v-else-if="!ocrText">识别结果会保存在 raw/ocr.txt，不会自动覆盖正文。</p><pre v-else>{{ ocrText }}</pre><button v-if="ocrText" class="button button-secondary editor-ocr-insert" type="button" @click="insertOcrText">插入正文</button></div>
+        <div class="editor-ocr"><div class="editor-ocr-heading"><span>AI OCR</span><button class="icon-button" type="button" title="识别图片文字" aria-label="识别图片文字" :disabled="imageQueueLocked || pendingImages.length > 0" @click="runOcr"><LoaderCircle v-if="ocrRunning" :size="15" class="editor-spin" /><ScanText v-else :size="15" /></button></div><p v-if="pendingImages.length">先确认追加上方截图，再识别这条资料中的图片。</p><p v-else-if="!ocrText">使用设置中保存的 OCR 模型识别这条资料中的图片。</p><pre v-else>{{ ocrText }}</pre><div v-if="ocrText" class="editor-ocr-actions"><button class="button button-secondary editor-ocr-insert" type="button" @click="insertOcrText">插入 OCR 原文</button><button class="button button-secondary editor-ocr-insert" type="button" :disabled="polishRunning" @click="runPolish"><LoaderCircle v-if="polishRunning" :size="15" class="editor-spin" /><Sparkles v-else :size="15" />{{ polishRunning ? "润色中..." : "润色文案" }}</button></div><pre v-if="polishText" class="editor-polish-result">{{ polishText }}</pre><button v-if="polishText" class="button button-primary editor-ocr-insert" type="button" @click="insertPolishedText">确认插入润色稿</button></div>
       </aside>
     </div>
   </section>
@@ -327,6 +352,8 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
 .editor-ocr p { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 .editor-ocr pre { max-height: 180px; margin: 9px 0 0; padding: 9px; overflow: auto; color: var(--ink); background: var(--surface-alt); border-radius: 7px; font-size: 10px; line-height: 1.55; white-space: pre-wrap; }
 .editor-ocr-insert { width: 100%; min-height: 31px; margin-top: 9px; padding: 0 8px; font-size: 11px; }
+.editor-ocr-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+.editor-polish-result { max-height: 180px; margin: 9px 0 0; padding: 9px; overflow: auto; color: var(--ink); background: var(--primary-soft); border-radius: 7px; font-size: 10px; line-height: 1.55; white-space: pre-wrap; }
 .editor-loading, .editor-error { display: flex; min-height: 240px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); text-align: center; }
 .editor-error h3 { margin: 2px 0 0; color: var(--ink); font-size: 16px; }
 .editor-error p { max-width: 450px; margin: 0; font-size: 13px; line-height: 1.6; }

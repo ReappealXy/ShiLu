@@ -335,4 +335,26 @@ Git Description：`加入应用单实例检查，重复启动时恢复原有窗�
 
 大白话：拾录已经开着时，再点快捷方式只会找回原窗口，不会再多开一个托盘图标，也不会清空当前页面。
 
+## 2026-09-12 增补 9：模型配置设置页
+
+**状态：前端设置页完成，构建检查通过。**
+
+设置页新增 OCR 识别模型和文案润色模型两张独立配置卡，可分别填写 API 地址、API Key 和模型名称，启用状态互不影响。每张卡支持获取 OpenAI 兼容接口的模型列表，并通过下拉框选择具体模型；接口不支持列表时仍可手动填写。测试模型按钮使用当前填写并选中的模型，测试过程显示加载状态和可读错误，不写入资料库。
+
+同时修正本地资料库路径的展示：界面自动隐藏 Windows 内部 `\\?\\` 前缀，实际磁盘路径和迁移逻辑不变。模型配置服务已与 `save_model_settings`、`fetch_model_list`、`test_model` 命令对齐。
+
+验证：`npm run build` 和 `cargo check --manifest-path src-tauri/Cargo.toml` 通过，`git diff --check` 无新增空白错误。
+
+Git Summary：`feat: add OCR and polish model settings`
+Git Description：`新增双模型配置、模型列表下拉选择、独立测试与保存状态反馈，修正资料库路径显示前缀。`
+大白话：现在可以在设置里分别配置识图模型和润色模型，拉取模型后选一个保存，还能马上点测试看这个模型到底能不能用。
+
+补充实现：OCR 识别已改为读取当前资料图片并调用已保存的 OCR 模型；未配置或调用失败时不再回退本地 OCR，而是显示明确错误。新增文案润色按钮，使用已保存的润色模型生成独立草稿，用户确认后才插入正文。两条模型配置均以当前下拉框选中模型为准。
+
+最终验证：`cargo fmt -- --check`、`cargo test --manifest-path src-tauri/Cargo.toml --lib`（24 通过，1 个需 OCR fixture 的测试忽略）、`npm run build`、`git diff --check` 通过；外部 Chrome 1100×680 设置页截图已检查。`npm run tauri:build` 生成 Windows x64 NSIS 安装包：`src-tauri/target/release/bundle/nsis/拾录 ShiLu_0.1.0_x64-setup.exe`，3,833,741 字节，SHA256 `1B16C717373D2728369581E18E64FDAA3F4E56CCFCB29C3BF1A6AF0F8B766D63`。未使用真实 API Key 请求外部服务，未覆盖安装现有程序。
+
+Git Summary：`feat: configure and test OCR and polish models`
+Git Description：`增加双模型 OpenAI 兼容配置、模型列表下拉选择和按当前模型测试；OCR 与润色均走外部接口，支持独立保存、错误反馈与人工确认插入，修复资料库路径展示。`
+大白话：设置里现在能分别选识图模型和润色模型，点“测试模型”就能知道当前选中的到底能不能用；识别失败不会偷偷换成本地 OCR。
+
 本轮交付：`npm run tauri:build`（包含前端类型检查和构建）、Rust 格式检查、PowerShell/Node 脚本语法检查及 `git diff --check` 通过。Windows x64 NSIS 安装包于 2026-09-11 23:02 生成：`src-tauri/target/release/bundle/nsis/拾录 ShiLu_0.1.0_x64-setup.exe`，2,897,965 字节，SHA256 `3719495CCEF5D2FC08B66B0D7EC2F6CE0B1739BF4A0B9D90820A79E7587FD010`。已停止本轮临时 1421 端口测试服务；未覆盖安装用户的拾录，未提交 Git。升级前请从托盘退出旧版本，再运行安装包；旧进程本身不具备新增的单实例检查。
