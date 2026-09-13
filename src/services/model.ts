@@ -26,12 +26,16 @@ export function saveModelSettings(ocrModel: ModelConfig, polishModel: ModelConfi
   return invoke<ModelSettings>("save_model_settings", { ocrModel, polishModel });
 }
 
+export function saveSingleModelSettings(kind: ModelKind, model: ModelConfig): Promise<ModelSettings> {
+  return invoke<ModelSettings>("save_single_model_settings", { kind, model });
+}
+
 export function fetchModelList(config: ModelConfig): Promise<ModelListResult> {
   return invoke<ModelListResult>("fetch_model_list", { model: config });
 }
 
-export function testModel(kind: ModelKind, config: ModelConfig): Promise<void> {
-  return invoke<string>("test_model", { kind, model: config }).then(() => undefined);
+export function testModel(kind: ModelKind, config: ModelConfig): Promise<string> {
+  return invoke<string>("test_model", { kind, model: config });
 }
 
 export function ocrWithModel(model: ModelConfig, imageBase64: string): Promise<string> {

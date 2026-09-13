@@ -24,6 +24,8 @@ const MAX_IMPORT_BYTES: u64 = 200 * 1024 * 1024;
 
 static ARTICLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static IMAGE_IMPORT_LOCK: Mutex<()> = Mutex::new(());
+static ARTICLE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static APP_CONFIG_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -106,6 +108,25 @@ pub struct ArticleCreateResult {
     pub images: ImageImportResult,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArticleStatus {
+    Draft,
+    #[default]
+    Active,
+    Archived,
+}
+
+impl ArticleStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Draft => "draft",
+            Self::Active => "active",
+            Self::Archived => "archived",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArticleDocument {
@@ -120,9 +141,12 @@ pub struct ArticleDocument {
     pub created_at: String,
     pub updated_at: String,
     pub markdown_path: String,
+    pub status: ArticleStatus,
+    pub capture_step: u8,
+    pub source_images: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArticleDraft {
     pub title: String,
@@ -136,6 +160,12 @@ pub struct ArticleDraft {
     pub content: String,
     #[serde(default)]
     pub notes: String,
+    #[serde(default)]
+    pub status: Option<ArticleStatus>,
+    #[serde(default)]
+    pub capture_step: Option<u8>,
+    #[serde(default)]
+    pub source_images: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +179,9 @@ pub struct ArticleSummary {
     pub tags: Vec<String>,
     pub updated_at: String,
     pub markdown_path: String,
+    pub status: ArticleStatus,
+    pub capture_step: u8,
+    pub source_images: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +264,7 @@ pub fn get_app_settings(app: AppHandle) -> StorageResult<AppSettings> {
 #[tauri::command]
 pub fn set_theme_preference(app: AppHandle, theme: String) -> StorageResult<AppSettings> {
     let theme = normalize_theme(&theme)?;
+    let _guard = lock_app_config()?;
     let config_path = app_config_path(&app)?;
     let mut config = read_app_config(&config_path)?;
     config.theme = theme.clone();
@@ -244,6 +278,7 @@ pub fn set_theme_preference(app: AppHandle, theme: String) -> StorageResult<AppS
 
 #[tauri::command]
 pub fn initialize_library(app: AppHandle, library_path: String) -> StorageResult<LibraryStatus> {
+    let _guard = lock_app_config()?;
     let root = validate_library_root(Path::new(&library_path))?;
     initialize_library_at(&root)?;
 
@@ -265,6 +300,7 @@ pub fn initialize_library(app: AppHandle, library_path: String) -> StorageResult
 
 #[tauri::command]
 pub fn migrate_library(app: AppHandle, library_path: String) -> StorageResult<LibraryStatus> {
+    let _guard = lock_app_config()?;
     let destination = validate_library_root(Path::new(&library_path))?;
     let config_path = app_config_path(&app)?;
     let Some(current_path) = read_library_config(&config_path)? else {
@@ -376,6 +412,21 @@ pub async fn create_article_with_sources(
 }
 
 #[tauri::command]
+pub async fn create_capture_draft(
+    app: AppHandle,
+    title: String,
+    source_url: Option<String>,
+    sources: Vec<ImageSource>,
+) -> StorageResult<ArticleCreateResult> {
+    let root = configured_ready_library(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        create_capture_draft_at(&root, &title, source_url.as_deref(), &sources)
+    })
+    .await
+    .map_err(|_| StorageError::new("DRAFT_CREATE_FAILED", "草稿创建任务失败，请重试。"))?
+}
+
+#[tauri::command]
 pub async fn import_article_sources(
     app: AppHandle,
     article_reference: String,
@@ -406,9 +457,23 @@ pub fn save_article(
 }
 
 #[tauri::command]
-pub fn list_articles(app: AppHandle, query: String) -> StorageResult<Vec<ArticleSummary>> {
+pub fn list_articles(
+    app: AppHandle,
+    query: String,
+    status: Option<ArticleStatus>,
+) -> StorageResult<Vec<ArticleSummary>> {
     let root = configured_ready_library(&app)?;
-    list_articles_at(&root, query.trim())
+    list_articles_at(&root, query.trim(), status.unwrap_or_default())
+}
+
+#[tauri::command]
+pub fn set_article_status(
+    app: AppHandle,
+    article_reference: String,
+    status: ArticleStatus,
+) -> StorageResult<ArticleDocument> {
+    let root = configured_ready_library(&app)?;
+    set_article_status_at(&root, &article_reference, status)
 }
 
 #[tauri::command]
@@ -425,6 +490,12 @@ pub(crate) fn app_config_path(app: &AppHandle) -> StorageResult<PathBuf> {
         )
     })?;
     Ok(config_dir.join(CONFIG_FILE_NAME))
+}
+
+fn lock_app_config() -> StorageResult<std::sync::MutexGuard<'static, ()>> {
+    APP_CONFIG_LOCK
+        .lock()
+        .map_err(|_| StorageError::new("APP_CONFIG_BUSY", "设置保存状态异常，请重启软件后重试。"))
 }
 
 fn read_library_config(config_path: &Path) -> StorageResult<Option<String>> {
@@ -492,6 +563,14 @@ pub(crate) fn configured_ready_library(app: &AppHandle) -> StorageResult<PathBuf
             format!("资料库结构不完整，缺少：{}。", missing_items.join("、")),
         ));
     }
+    app.asset_protocol_scope()
+        .allow_directory(root.join(ARTICLES_DIR_NAME), true)
+        .map_err(|error| {
+            StorageError::new(
+                "IMAGE_PREVIEW_UNAVAILABLE",
+                format!("无法准备资料图片预览：{error}"),
+            )
+        })?;
     Ok(root)
 }
 
@@ -797,6 +876,45 @@ fn create_article_with_sources_at(
     )
 }
 
+fn create_capture_draft_at(
+    root: &Path,
+    title: &str,
+    source_url: Option<&str>,
+    sources: &[ImageSource],
+) -> StorageResult<ArticleCreateResult> {
+    let title = if title.trim().is_empty() {
+        "未命名资料"
+    } else {
+        title.trim()
+    };
+    let result = create_article_with_sources_at(root, title, source_url, sources)?;
+    let persist = (|| -> StorageResult<()> {
+        let mut document = read_article_at(root, &result.article.folder_name)?;
+        document.status = ArticleStatus::Draft;
+        document.capture_step = 2;
+        document.source_images = result
+            .images
+            .images
+            .iter()
+            .map(|image| image.relative_path.clone())
+            .collect();
+        write_text_atomic(
+            Path::new(&result.article.markdown_path),
+            &render_article_markdown(&document),
+        )
+    })();
+    if let Err(error) = persist {
+        fs::remove_dir_all(Path::new(&result.article.folder_path)).map_err(|cleanup_error| {
+            StorageError::new(
+                "ARTICLE_ROLLBACK_FAILED",
+                format!("{} 新建草稿清理失败：{}", error.message, cleanup_error),
+            )
+        })?;
+        return Err(error);
+    }
+    Ok(result)
+}
+
 fn create_article_with_sources_using(
     root: &Path,
     title: &str,
@@ -985,7 +1103,10 @@ pub(crate) fn resolve_article_path(
     Ok((article_path, folder_name, article_id))
 }
 
-fn read_article_at(root: &Path, article_reference: &str) -> StorageResult<ArticleDocument> {
+pub(crate) fn read_article_at(
+    root: &Path,
+    article_reference: &str,
+) -> StorageResult<ArticleDocument> {
     let (article_path, folder_name, article_id) = resolve_article_path(root, article_reference)?;
     let markdown_path = article_path.join("index.md");
     let markdown = fs::read_to_string(&markdown_path)
@@ -1002,6 +1123,9 @@ fn save_article_at(
     article_reference: &str,
     draft: ArticleDraft,
 ) -> StorageResult<ArticleDocument> {
+    let _guard = ARTICLE_WRITE_LOCK.lock().map_err(|_| {
+        StorageError::new("ARTICLE_SAVE_BUSY", "资料保存状态异常，请重启软件后重试。")
+    })?;
     let (article_path, folder_name, article_id) = resolve_article_path(root, article_reference)?;
     let markdown_path = article_path.join("index.md");
     let current = if markdown_path.is_file() {
@@ -1024,12 +1148,26 @@ fn save_article_at(
             created_at: String::new(),
             updated_at: String::new(),
             markdown_path: String::new(),
+            status: ArticleStatus::Active,
+            capture_step: 3,
+            source_images: Vec::new(),
         }
     };
+    let status = draft.status.unwrap_or(current.status);
+    validate_status_transition(current.status, status)?;
     let title = draft.title.trim();
-    if title.is_empty() {
+    if title.is_empty() && status != ArticleStatus::Draft {
         return Err(StorageError::new("INVALID_TITLE", "资料标题不能为空。"));
     }
+    let capture_step = draft.capture_step.unwrap_or(current.capture_step);
+    if !(1..=3).contains(&capture_step) {
+        return Err(StorageError::new(
+            "INVALID_CAPTURE_STEP",
+            "收集步骤必须在 1 到 3 之间。",
+        ));
+    }
+    let source_images = draft.source_images.unwrap_or(current.source_images);
+    resolve_source_image_paths(&article_path, &source_images)?;
     let updated_at = Local::now().to_rfc3339_opts(SecondsFormat::Secs, false);
     let created_at = if current.created_at.is_empty() {
         updated_at.clone()
@@ -1039,7 +1177,12 @@ fn save_article_at(
     let document = ArticleDocument {
         id: article_id,
         folder_name,
-        title: title.to_string(),
+        title: if title.is_empty() {
+            "未命名资料"
+        } else {
+            title
+        }
+        .to_string(),
         summary: draft.summary.trim().to_string(),
         source_url: draft.source_url.trim().to_string(),
         tags: clean_tags(draft.tags),
@@ -1048,12 +1191,136 @@ fn save_article_at(
         created_at,
         updated_at,
         markdown_path: path_to_string(&markdown_path)?,
+        status,
+        capture_step,
+        source_images,
     };
     write_text_atomic(&markdown_path, &render_article_markdown(&document))?;
     Ok(document)
 }
 
-fn list_articles_at(root: &Path, query: &str) -> StorageResult<Vec<ArticleSummary>> {
+fn validate_status_transition(current: ArticleStatus, next: ArticleStatus) -> StorageResult<()> {
+    if current == next
+        || matches!(
+            (current, next),
+            (ArticleStatus::Draft, ArticleStatus::Active)
+                | (ArticleStatus::Active, ArticleStatus::Archived)
+                | (ArticleStatus::Archived, ArticleStatus::Active)
+        )
+    {
+        return Ok(());
+    }
+    Err(StorageError::new(
+        "INVALID_ARTICLE_STATUS_CHANGE",
+        "草稿需先保存为正式资料才能归档，正式资料不能改回草稿。",
+    ))
+}
+
+fn set_article_status_at(
+    root: &Path,
+    article_reference: &str,
+    status: ArticleStatus,
+) -> StorageResult<ArticleDocument> {
+    let _guard = ARTICLE_WRITE_LOCK.lock().map_err(|_| {
+        StorageError::new("ARTICLE_SAVE_BUSY", "资料保存状态异常，请重启软件后重试。")
+    })?;
+    let mut document = read_article_at(root, article_reference)?;
+    validate_status_transition(document.status, status)?;
+    if document.status != status {
+        document.status = status;
+        document.updated_at = Local::now().to_rfc3339_opts(SecondsFormat::Secs, false);
+        let markdown = fs::read_to_string(&document.markdown_path)
+            .map_err(|error| StorageError::io("无法读取文章 Markdown", error))?;
+        write_text_atomic(
+            Path::new(&document.markdown_path),
+            &update_status_markdown(&markdown, status, &document.updated_at),
+        )?;
+    }
+    Ok(document)
+}
+
+fn update_status_markdown(markdown: &str, status: ArticleStatus, updated_at: &str) -> String {
+    let newline = if markdown.starts_with("---\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let opening = format!("---{newline}");
+    let closing = format!("{newline}---{newline}");
+    let (front_matter, body) = markdown
+        .strip_prefix(&opening)
+        .and_then(|rest| rest.split_once(&closing))
+        .unwrap_or(("", markdown));
+    let mut lines: Vec<String> = front_matter.lines().map(str::to_owned).collect();
+    for (key, value) in [("status", status.as_str()), ("updated_at", updated_at)] {
+        let replacement = format!("{key}: \"{}\"", escape_yaml(value));
+        if let Some(line) = lines.iter_mut().find(|line| {
+            line.split_once(':')
+                .is_some_and(|(name, _)| name.trim() == key)
+        }) {
+            *line = replacement;
+        } else {
+            lines.push(replacement);
+        }
+    }
+    format!("{opening}{}{closing}{body}", lines.join(newline))
+}
+
+pub(crate) fn resolve_source_image_paths(
+    article_path: &Path,
+    source_images: &[String],
+) -> StorageResult<Vec<PathBuf>> {
+    if source_images.is_empty() {
+        return Ok(Vec::new());
+    }
+    let article_path = fs::canonicalize(article_path)
+        .map_err(|error| StorageError::io("无法确认文章路径", error))?;
+    let images_path = fs::canonicalize(article_path.join("images"))
+        .map_err(|error| StorageError::io("无法确认文章图片目录", error))?;
+    if !images_path.starts_with(&article_path) {
+        return Err(StorageError::new(
+            "UNSAFE_IMAGES_PATH",
+            "图片目录不在文章文件夹内。",
+        ));
+    }
+    let mut resolved = Vec::with_capacity(source_images.len());
+    for relative in source_images {
+        let file_name = relative
+            .strip_prefix("images/")
+            .filter(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                    && Path::new(name)
+                        .extension()
+                        .and_then(|extension| extension.to_str())
+                        .is_some_and(|extension| ALLOWED_IMAGE_EXTENSIONS.contains(&extension))
+            })
+            .ok_or_else(|| {
+                StorageError::new(
+                    "INVALID_SOURCE_IMAGE_PATH",
+                    "识别截图必须是文章 images 文件夹中的图片。",
+                )
+            })?;
+        let path = fs::canonicalize(images_path.join(file_name))
+            .map_err(|error| StorageError::io("无法读取识别截图", error))?;
+        if !path.is_file() || !path.starts_with(&images_path) || resolved.contains(&path) {
+            return Err(StorageError::new(
+                "INVALID_SOURCE_IMAGE_PATH",
+                "识别截图路径无效、重复或超出文章图片目录。",
+            ));
+        }
+        resolved.push(path);
+    }
+    Ok(resolved)
+}
+
+fn list_articles_at(
+    root: &Path,
+    query: &str,
+    status: ArticleStatus,
+) -> StorageResult<Vec<ArticleSummary>> {
     let articles_path = fs::canonicalize(root.join(ARTICLES_DIR_NAME))
         .map_err(|error| StorageError::io("无法读取文章目录", error))?;
     let needle = query.to_lowercase();
@@ -1076,6 +1343,9 @@ fn list_articles_at(root: &Path, query: &str) -> StorageResult<Vec<ArticleSummar
             article_id_from_folder_name(&folder_name).unwrap_or_default(),
             &folder_name,
         );
+        if document.status != status {
+            continue;
+        }
         let haystack = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             document.title,
@@ -1098,6 +1368,9 @@ fn list_articles_at(root: &Path, query: &str) -> StorageResult<Vec<ArticleSummar
             tags: document.tags,
             updated_at: document.updated_at,
             markdown_path: path_to_string(&markdown_path)?,
+            status: document.status,
+            capture_step: document.capture_step,
+            source_images: document.source_images,
         });
     }
     articles.sort_by(|left, right| {
@@ -1225,6 +1498,8 @@ fn ocr_article_images_at(_root: &Path, _article_reference: &str) -> StorageResul
 }
 
 fn parse_article_markdown(markdown: &str, article_id: &str, folder_name: &str) -> ArticleDocument {
+    let normalized = markdown.replace("\r\n", "\n");
+    let markdown = normalized.as_str();
     let (front_matter, body) = if let Some(rest) = markdown.strip_prefix("---\n") {
         rest.split_once("\n---\n")
             .map_or(("", markdown), |parts| parts)
@@ -1237,6 +1512,20 @@ fn parse_article_markdown(markdown: &str, article_id: &str, folder_name: &str) -
     let created_at = yaml_value(front_matter, "created_at").unwrap_or_default();
     let updated_at = yaml_value(front_matter, "updated_at").unwrap_or_else(|| created_at.clone());
     let tags = yaml_list(front_matter, "tags");
+    let status = match yaml_value(front_matter, "status").as_deref() {
+        Some("draft") => ArticleStatus::Draft,
+        Some("archived") => ArticleStatus::Archived,
+        _ => ArticleStatus::Active,
+    };
+    let capture_step = yaml_value(front_matter, "capture_step")
+        .and_then(|step| step.parse::<u8>().ok())
+        .filter(|step| (1..=3).contains(step))
+        .unwrap_or(3);
+    let source_images = front_matter
+        .lines()
+        .find_map(|line| line.strip_prefix("source_images:"))
+        .and_then(|value| serde_json::from_str::<Vec<String>>(value.trim()).ok())
+        .unwrap_or_default();
     let content = section_body(body, "正文");
     let notes = section_body(body, "我的备注");
     ArticleDocument {
@@ -1251,6 +1540,9 @@ fn parse_article_markdown(markdown: &str, article_id: &str, folder_name: &str) -
         created_at,
         updated_at,
         markdown_path: String::new(),
+        status,
+        capture_step,
+        source_images,
     }
 }
 
@@ -1268,8 +1560,10 @@ fn render_article_markdown(document: &ArticleDocument) -> String {
                 .join(", ")
         )
     };
+    let source_images = serde_json::to_string(&document.source_images)
+        .expect("string arrays can always be serialized");
     format!(
-        "---\nid: \"{}\"\ntitle: \"{}\"\nsummary: \"{}\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\ntags: {}\n---\n\n# {}\n\n## 正文\n\n{}\n\n## 我的备注\n\n{}\n",
+        "---\nid: \"{}\"\ntitle: \"{}\"\nsummary: \"{}\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\ntags: {}\nstatus: \"{}\"\ncapture_step: {}\nsource_images: {}\n---\n\n# {}\n\n## 正文\n\n{}\n\n## 我的备注\n\n{}\n",
         escape_yaml(&document.id),
         escape_yaml(&document.title),
         escape_yaml(&document.summary),
@@ -1277,6 +1571,9 @@ fn render_article_markdown(document: &ArticleDocument) -> String {
         escape_yaml(&document.updated_at),
         escape_yaml(&document.source_url),
         tags,
+        document.status.as_str(),
+        document.capture_step,
+        source_images,
         document.title,
         document.content,
         document.notes
@@ -1323,15 +1620,19 @@ fn first_heading(body: &str) -> String {
 }
 
 fn section_body(body: &str, heading: &str) -> String {
-    let marker = format!("## {}", heading);
+    let marker = format!("## {}\n", heading);
     let Some((_, rest)) = body.split_once(&marker) else {
         return String::new();
     };
     let rest = rest.trim_start_matches([' ', '\n', '\r']);
-    let Some((content, _)) = rest.split_once("\n## ") else {
-        return rest.trim().to_string();
-    };
-    content.trim().to_string()
+    if heading == "正文" {
+        return rest
+            .rsplit_once("\n## 我的备注\n")
+            .map_or(rest, |(content, _)| content)
+            .trim()
+            .to_string();
+    }
+    rest.trim().to_string()
 }
 
 fn clean_tags(tags: Vec<String>) -> Vec<String> {
@@ -1629,6 +1930,254 @@ mod tests {
     fn temporary_library_root(test_name: &str) -> PathBuf {
         let nonce = format!("{}-{}", std::process::id(), short_id());
         std::env::temp_dir().join(format!("shilu-storage-test-{}-{}", test_name, nonce))
+    }
+
+    struct LifecycleTestLibrary(PathBuf);
+
+    impl LifecycleTestLibrary {
+        fn new(name: &str) -> Self {
+            let root = temporary_library_root(name);
+            fs::create_dir_all(&root).unwrap();
+            initialize_library_at(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for LifecycleTestLibrary {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn legacy_articles_default_to_active_without_ocr_sources() {
+        let library = LifecycleTestLibrary::new("legacy-status");
+        let skeleton = create_article_skeleton_at(&library.0, "旧资料", None).unwrap();
+        let document = read_article_at(&library.0, &skeleton.folder_name).unwrap();
+        assert_eq!(document.status, ArticleStatus::Active);
+        assert_eq!(document.capture_step, 3);
+        assert!(document.source_images.is_empty());
+        assert_eq!(
+            list_articles_at(&library.0, "", ArticleStatus::Active)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(list_articles_at(&library.0, "", ArticleStatus::Draft)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn draft_preserves_source_order_and_metadata_edits_do_not_promote_illustrations() {
+        let library = LifecycleTestLibrary::new("draft-images");
+        let result = create_capture_draft_at(
+            &library.0,
+            "",
+            None,
+            &[
+                screenshot_source([255, 0, 0, 255]),
+                screenshot_source([0, 0, 255, 255]),
+            ],
+        )
+        .unwrap();
+        let reference = &result.article.folder_name;
+        let document = read_article_at(&library.0, reference).unwrap();
+        assert_eq!(document.title, "未命名资料");
+        assert_eq!(document.status, ArticleStatus::Draft);
+        assert_eq!(document.capture_step, 2);
+        assert_eq!(document.source_images, ["images/001.png", "images/002.png"]);
+        let added = import_article_sources_at(
+            &library.0,
+            reference,
+            &[screenshot_source([0, 255, 0, 255])],
+        )
+        .unwrap();
+        assert_eq!(added.images[0].relative_path, "images/003.png");
+        let saved = save_article_at(&library.0, reference, ArticleDraft {
+            title: "补充标题".into(),
+            source_url: "https://example.com/source".into(),
+            content: "## OCR 小标题\n\n手动校正后的正文\n\n![配图](images/003.png)\n\n## 第二小节\n\n更多内容".into(),
+            capture_step: Some(3),
+            ..ArticleDraft::default()
+        }).unwrap();
+        assert_eq!(saved.status, ArticleStatus::Draft);
+        assert_eq!(saved.source_images, document.source_images);
+        let read_back = read_article_at(&library.0, reference).unwrap();
+        assert_eq!(read_back.content, saved.content);
+        let source_paths = resolve_source_image_paths(
+            Path::new(&result.article.folder_path),
+            &saved.source_images,
+        )
+        .unwrap();
+        assert_eq!(source_paths.len(), 2);
+        assert_eq!(
+            fs::read(&source_paths[0]).unwrap(),
+            screenshot_png([255, 0, 0, 255])
+        );
+        assert_eq!(
+            fs::read(&source_paths[1]).unwrap(),
+            screenshot_png([0, 0, 255, 255])
+        );
+    }
+
+    #[test]
+    fn draft_publish_archive_and_restore_preserve_content_images_and_status_filtering() {
+        let library = LifecycleTestLibrary::new("lifecycle");
+        let result = create_capture_draft_at(
+            &library.0,
+            "待整理",
+            None,
+            &[screenshot_source([0, 0, 255, 255])],
+        )
+        .unwrap();
+        let reference = &result.article.folder_name;
+        let empty_title_draft =
+            save_article_at(&library.0, reference, ArticleDraft::default()).unwrap();
+        assert_eq!(empty_title_draft.title, "未命名资料");
+        assert_eq!(empty_title_draft.status, ArticleStatus::Draft);
+        let error =
+            set_article_status_at(&library.0, reference, ArticleStatus::Archived).unwrap_err();
+        assert_eq!(error.code, "INVALID_ARTICLE_STATUS_CHANGE");
+        let published = save_article_at(
+            &library.0,
+            reference,
+            ArticleDraft {
+                title: "整理完成".into(),
+                content: "## 正文小节\n\n保留段落\n\n![插图](images/001.png)".into(),
+                notes: "保留备注".into(),
+                status: Some(ArticleStatus::Active),
+                capture_step: Some(3),
+                ..ArticleDraft::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(published.status, ArticleStatus::Active);
+        assert!(list_articles_at(&library.0, "", ArticleStatus::Draft)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            list_articles_at(&library.0, "保留段落", ArticleStatus::Active)
+                .unwrap()
+                .len(),
+            1
+        );
+        let image_before = fs::read(&result.images.images[0].path).unwrap();
+        let archived =
+            set_article_status_at(&library.0, reference, ArticleStatus::Archived).unwrap();
+        assert_eq!(archived.content, published.content);
+        assert_eq!(archived.notes, published.notes);
+        assert_eq!(archived.source_images, published.source_images);
+        assert!(list_articles_at(&library.0, "", ArticleStatus::Active)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            list_articles_at(&library.0, "", ArticleStatus::Archived)
+                .unwrap()
+                .len(),
+            1
+        );
+        let saved_archive = save_article_at(
+            &library.0,
+            reference,
+            ArticleDraft {
+                title: archived.title.clone(),
+                content: archived.content.clone(),
+                notes: archived.notes.clone(),
+                ..ArticleDraft::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(saved_archive.status, ArticleStatus::Archived);
+        let restored = set_article_status_at(&library.0, reference, ArticleStatus::Active).unwrap();
+        assert_eq!(restored.content, published.content);
+        assert_eq!(restored.notes, published.notes);
+        assert_eq!(restored.folder_name, published.folder_name);
+        assert_eq!(restored.source_images, published.source_images);
+        assert_eq!(
+            fs::read(&result.images.images[0].path).unwrap(),
+            image_before
+        );
+        assert!(list_articles_at(&library.0, "", ArticleStatus::Archived)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            list_articles_at(&library.0, "", ArticleStatus::Active)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn lifecycle_validation_does_not_change_existing_markdown() {
+        let library = LifecycleTestLibrary::new("source-validation");
+        let result = create_capture_draft_at(
+            &library.0,
+            "待整理",
+            None,
+            &[screenshot_source([1, 2, 3, 255])],
+        )
+        .unwrap();
+        let before = fs::read(&result.article.markdown_path).unwrap();
+        for source in [
+            "../outside.png",
+            "images/../../outside.png",
+            "images\\001.png",
+            "images/001.png:extra",
+            "images/001.txt",
+            "C:/outside.png",
+        ] {
+            let error = save_article_at(
+                &library.0,
+                &result.article.folder_name,
+                ArticleDraft {
+                    title: "待整理".into(),
+                    source_images: Some(vec![source.to_string()]),
+                    ..ArticleDraft::default()
+                },
+            )
+            .unwrap_err();
+            assert_eq!(error.code, "INVALID_SOURCE_IMAGE_PATH", "{source}");
+            assert_eq!(fs::read(&result.article.markdown_path).unwrap(), before);
+        }
+        assert!(save_article_at(
+            &library.0,
+            &result.article.folder_name,
+            ArticleDraft {
+                title: "待整理".into(),
+                capture_step: Some(4),
+                ..ArticleDraft::default()
+            }
+        )
+        .is_err());
+        assert!(resolve_source_image_paths(
+            Path::new(&result.article.folder_path),
+            &["images/001.png".into(), "images/001.png".into(),]
+        )
+        .is_err());
+        assert_eq!(fs::read(&result.article.markdown_path).unwrap(), before);
+    }
+
+    #[test]
+    fn archiving_preserves_custom_front_matter_and_exact_markdown_body() {
+        let library = LifecycleTestLibrary::new("archive-lossless");
+        let article = create_article_skeleton_at(&library.0, "保留格式", None).unwrap();
+        let body = "\r\n# 保留格式\r\n\r\n## 正文\r\n\r\n## 自定义小节\r\n\r\n| 项目 | 内容 |\r\n| --- | --- |\r\n| 一 | 二 |\r\n\r\n## 我的备注\r\n\r\n备注  \r\n";
+        let markdown =
+            format!("---\r\ntitle: \"保留格式\"\r\ncustom: \"不属于软件的字段\"\r\n---\r\n{body}");
+        write_text_atomic(Path::new(&article.markdown_path), &markdown).unwrap();
+        set_article_status_at(&library.0, &article.folder_name, ArticleStatus::Archived).unwrap();
+        let archived = fs::read_to_string(&article.markdown_path).unwrap();
+        assert!(archived.contains("custom: \"不属于软件的字段\"\r\n"));
+        assert!(archived.ends_with(body));
+        let read_back = read_article_at(&library.0, &article.folder_name).unwrap();
+        assert_eq!(read_back.status, ArticleStatus::Archived);
+        assert!(read_back.content.contains("## 自定义小节"));
+        set_article_status_at(&library.0, &article.folder_name, ArticleStatus::Active).unwrap();
+        let restored = fs::read_to_string(&article.markdown_path).unwrap();
+        assert!(restored.ends_with(body));
+        assert!(restored.contains("custom: \"不属于软件的字段\"\r\n"));
     }
 
     #[cfg(windows)]
@@ -2193,6 +2742,7 @@ mod tests {
                     tags: vec!["AI".to_string(), "AI".to_string(), "写作".to_string()],
                     content: "## 小节\n\n正文内容".to_string(),
                     notes: "我的备注".to_string(),
+                    ..ArticleDraft::default()
                 },
             )?;
             assert_eq!(saved.title, "更新后的标题");
@@ -2230,12 +2780,16 @@ mod tests {
                     tags: vec!["AI".to_string()],
                     content: "模型提示词".to_string(),
                     notes: "收藏".to_string(),
+                    ..ArticleDraft::default()
                 },
             )?;
-            let matches = list_articles_at(&root, "提示词")?;
+            let matches = list_articles_at(&root, "提示词", ArticleStatus::Active)?;
             assert_eq!(matches.len(), 1);
             assert_eq!(matches[0].title, "视觉工具");
-            assert_eq!(list_articles_at(&root, "不存在")?.len(), 0);
+            assert_eq!(
+                list_articles_at(&root, "不存在", ArticleStatus::Active)?.len(),
+                0
+            );
             Ok(())
         })();
         let cleanup = fs::remove_dir_all(&root);

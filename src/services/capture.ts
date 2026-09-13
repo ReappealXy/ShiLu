@@ -31,6 +31,14 @@ export type ImageSource =
   | { kind: "path"; path: string }
   | { kind: "clipboard"; name: string; base64: string };
 
+export function createCaptureDraft(title: string, sourceUrl: string, sources: ImageSource[]): Promise<CaptureResult> {
+  return invoke<CaptureResult>("create_capture_draft", {
+    title,
+    sourceUrl: sourceUrl.trim() || null,
+    sources: sources.map((source) => ({ ...source })),
+  });
+}
+
 export function createArticleWithSources(title: string, sourceUrl: string, sources: ImageSource[]): Promise<CaptureResult> {
   return invoke<CaptureResult>("create_article_with_sources", {
     title,

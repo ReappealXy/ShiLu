@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import {
   CheckCircle2,
   ExternalLink,
   FilePlus2,
   FolderOpen,
   KeyRound,
+  Info,
   LoaderCircle,
   MonitorCog,
   RefreshCw,
@@ -26,7 +27,7 @@ import {
 import {
   fetchModelList,
   getModelSettings,
-  saveModelSettings,
+  saveSingleModelSettings,
   testModel,
   type ModelConfig,
   type ModelKind,
@@ -44,79 +45,123 @@ const defaultModel = (): ModelConfig => ({ enabled: false, baseUrl: "", apiKey: 
 const modelConfigs = ref<Record<ModelKind, ModelConfig>>({ ocr: defaultModel(), polish: defaultModel() });
 const modelOptions = ref<Record<ModelKind, string[]>>({ ocr: [], polish: [] });
 const modelLoading = ref(true);
-const modelSaving = ref<ModelKind | null>(null);
-const modelTesting = ref<ModelKind | null>(null);
-const modelFetching = ref<ModelKind | null>(null);
-const modelFeedback = ref<Record<ModelKind, string>>({ ocr: "", polish: "" });
-const modelErrors = ref<Record<ModelKind, string>>({ ocr: "", polish: "" });
+type ModelOperation = "fetch" | "test" | "save";
+type OperationState = { pending: boolean; message: string; detail: string; tone: "success" | "error" | "notice" };
+const newOperation = (): OperationState => ({ pending: false, message: "", detail: "", tone: "notice" });
+const newOperations = () => ({ fetch: newOperation(), test: newOperation(), save: newOperation() });
+const modelOperations = ref<Record<ModelKind, Record<ModelOperation, OperationState>>>({ ocr: newOperations(), polish: newOperations() });
+const modelLoadError = ref("");
+const modelListConnections = ref<Record<ModelKind, string>>({ ocr: "", polish: "" });
+let active = true;
+
+onUnmounted(() => { active = false; });
 
 function modelTitle(kind: ModelKind) {
   return kind === "ocr" ? "OCR 识别模型" : "文案润色模型";
 }
 
 function modelDescription(kind: ModelKind) {
-  return kind === "ocr" ? "把截图转换成可编辑的原始文字。需要支持图片输入的视觉模型。" : "把 OCR 原文整理、分段并润色成新的文案，不会自动覆盖原文。";
+  return kind === "ocr" ? "识别截图中的文字。测试会校验一张内置文字图。" : "润色当前编辑的正文。测试会返回一段示例润色结果。";
 }
 
 function modelConfig(kind: ModelKind) {
   return modelConfigs.value[kind];
 }
 
+function connectionSignature(config: ModelConfig) {
+  return JSON.stringify([config.baseUrl.trim(), config.apiKey.trim()]);
+}
+
+function configSignature(config: ModelConfig) {
+  return JSON.stringify([connectionSignature(config), config.model.trim(), config.enabled]);
+}
+
+function availableModels(kind: ModelKind) {
+  return modelListConnections.value[kind] === connectionSignature(modelConfig(kind)) ? modelOptions.value[kind] : [];
+}
+
+function startOperation(kind: ModelKind, operation: ModelOperation) {
+  const state = modelOperations.value[kind][operation];
+  if (state.pending) return null;
+  Object.assign(state, { pending: true, message: "", detail: "", tone: "notice" });
+  return state;
+}
+
 async function loadModelSettings() {
   modelLoading.value = true;
+  modelLoadError.value = "";
   try {
     const settings = await getModelSettings();
+    if (!active) return;
     modelConfigs.value.ocr = { ...defaultModel(), ...(settings.ocrModel ?? {}) };
     modelConfigs.value.polish = { ...defaultModel(), ...(settings.polishModel ?? {}) };
   } catch (error) {
-    modelErrors.value.ocr = getErrorMessage(error, "无法读取模型设置。");
+    if (active) modelLoadError.value = getErrorMessage(error, "无法读取模型设置，请重试。");
   } finally {
     modelLoading.value = false;
   }
 }
 
 async function saveModel(kind: ModelKind) {
-  modelErrors.value[kind] = "";
-  modelFeedback.value[kind] = "";
-  modelSaving.value = kind;
+  const state = startOperation(kind, "save");
+  if (!state) return;
+  const snapshot = { ...modelConfig(kind) };
   try {
-    const settings = await saveModelSettings({ ...modelConfigs.value.ocr }, { ...modelConfigs.value.polish });
-    const saved = kind === "ocr" ? settings.ocrModel : settings.polishModel;
-    if (saved) modelConfigs.value[kind] = { ...defaultModel(), ...saved };
-    modelFeedback.value[kind] = "已保存模型设置。";
+    await saveSingleModelSettings(kind, snapshot);
+    if (!active) return;
+    const unchanged = configSignature(snapshot) === configSignature(modelConfig(kind));
+    state.tone = unchanged ? "success" : "notice";
+    state.message = unchanged ? `${modelTitle(kind)}配置已保存。` : "已保存点击时的配置；之后的修改尚未保存。";
   } catch (error) {
-    modelErrors.value[kind] = getErrorMessage(error, "保存失败，请检查配置后重试。");
+    if (!active) return;
+    state.tone = "error";
+    state.message = getErrorMessage(error, "保存失败，输入内容已保留，请重试。");
   } finally {
-    modelSaving.value = null;
+    state.pending = false;
   }
 }
 
 async function fetchModels(kind: ModelKind) {
-  modelErrors.value[kind] = "";
-  modelFeedback.value[kind] = "";
-  modelFetching.value = kind;
+  const state = startOperation(kind, "fetch");
+  if (!state) return;
+  const snapshot = { ...modelConfig(kind) };
   try {
-    const result = await fetchModelList({ ...modelConfig(kind) });
-    modelOptions.value[kind] = result.models ?? [];
-    modelFeedback.value[kind] = result.models?.length ? `已获取 ${result.models.length} 个模型。` : "接口返回为空，可手动填写模型名称。";
+    const result = await fetchModelList(snapshot);
+    if (!active) return;
+    if (connectionSignature(snapshot) !== connectionSignature(modelConfig(kind))) {
+      state.message = "地址或 Key 已变更，旧连接的列表未应用，请重新获取。";
+      return;
+    }
+    modelOptions.value[kind] = [...new Set(result.models.filter(model => model.trim()))].sort();
+    modelListConnections.value[kind] = connectionSignature(snapshot);
+    state.tone = modelOptions.value[kind].length ? "success" : "notice";
+    state.message = modelOptions.value[kind].length ? `已获取 ${modelOptions.value[kind].length} 个模型。` : "接口返回空列表，请手动填写模型名称。";
   } catch (error) {
-    modelErrors.value[kind] = getErrorMessage(error, "获取模型列表失败；你仍可以手动填写模型名称。");
+    if (!active) return;
+    state.tone = "error";
+    state.message = `获取列表失败：${getErrorMessage(error, "请检查地址和 Key。") } 可重试或手动填写模型名称。`;
   } finally {
-    modelFetching.value = null;
+    state.pending = false;
   }
 }
 
 async function testConfiguredModel(kind: ModelKind) {
-  modelErrors.value[kind] = "";
-  modelFeedback.value[kind] = "";
-  modelTesting.value = kind;
+  const state = startOperation(kind, "test");
+  if (!state) return;
+  const snapshot = { ...modelConfig(kind) };
   try {
-    await testModel(kind, { ...modelConfig(kind) });
-    modelFeedback.value[kind] = `${modelTitle(kind)}测试成功，可以正常使用。`;
+    const result = await testModel(kind, snapshot);
+    if (!active) return;
+    const unchanged = configSignature(snapshot) === configSignature(modelConfig(kind));
+    state.tone = unchanged ? "success" : "notice";
+    state.message = `${snapshot.model} ${kind === "ocr" ? "图片文字识别" : "文案润色"}测试成功。${unchanged ? "" : "配置已变更，此结果仅对应测试时的配置。"}`;
+    state.detail = result;
   } catch (error) {
-    modelErrors.value[kind] = getErrorMessage(error, "测试失败，请检查地址、Key 和所选模型。");
+    if (!active) return;
+    state.tone = "error";
+    state.message = `${snapshot.model || modelTitle(kind)} 测试失败：${getErrorMessage(error, "请检查地址、Key 和所选模型后重试。")}`;
   } finally {
-    modelTesting.value = null;
+    state.pending = false;
   }
 }
 
@@ -265,8 +310,9 @@ onMounted(() => {
             <span v-else class="status-badge status-badge-ready">可配置</span>
           </div>
 
+          <p class="settings-action-hint">获取列表只需地址和 Key；选择模型后即可测试，无须先保存。两个模型可以同时测试。</p>
           <div v-if="modelLoading" class="settings-loading-lines" aria-label="正在读取模型设置"><span></span><span></span></div>
-          <div v-else class="model-config-grid">
+          <div v-else-if="!modelLoadError" class="model-config-grid">
             <section v-for="kind in (['ocr', 'polish'] as ModelKind[])" :key="kind" class="model-config-panel" :aria-labelledby="`${kind}-model-heading`">
               <div class="model-config-heading">
                 <div class="model-config-title"><ScanText v-if="kind === 'ocr'" :size="17" /><Sparkles v-else :size="17" /><h4 :id="`${kind}-model-heading`">{{ modelTitle(kind) }}</h4></div>
@@ -276,18 +322,21 @@ onMounted(() => {
               <div class="model-fields">
                 <label class="model-field model-field-wide"><span>API 地址</span><input v-model.trim="modelConfigs[kind].baseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="url" /></label>
                 <label class="model-field model-field-wide"><span>API Key</span><input v-model="modelConfigs[kind].apiKey" type="text" placeholder="sk-..." autocomplete="off" /></label>
-                <label class="model-field model-field-wide"><span>模型</span><select v-model="modelConfigs[kind].model" :disabled="!modelOptions[kind].length"><option value="">{{ modelOptions[kind].length ? "请选择模型" : "请先获取模型列表或手动填写" }}</option><option v-for="model in modelOptions[kind]" :key="model" :value="model">{{ model }}</option></select><input v-if="!modelOptions[kind].length" v-model.trim="modelConfigs[kind].model" type="text" class="model-manual-input" placeholder="例如：gpt-4o-mini" autocomplete="off" /></label>
+                <label class="model-field model-field-wide"><span>模型</span><select v-if="availableModels(kind).length" v-model="modelConfigs[kind].model"><option value="">请选择模型</option><option v-if="modelConfigs[kind].model && !availableModels(kind).includes(modelConfigs[kind].model)" :value="modelConfigs[kind].model">自定义：{{ modelConfigs[kind].model }}</option><option v-for="model in availableModels(kind)" :key="model" :value="model">{{ model }}</option></select><input v-model.trim="modelConfigs[kind].model" type="text" class="model-manual-input" placeholder="可手动填写，例如：gpt-4o-mini" autocomplete="off" /></label>
               </div>
               <div class="model-actions">
-                <button class="button button-secondary" type="button" :disabled="modelFetching === kind || modelSaving === kind || modelTesting === kind" @click="fetchModels(kind)"><LoaderCircle v-if="modelFetching === kind" :size="15" class="model-spin" /><RefreshCw v-else :size="15" />{{ modelFetching === kind ? "获取中..." : "获取模型列表" }}</button>
-                <button class="button button-secondary" type="button" :disabled="modelTesting === kind || modelSaving === kind || !modelConfigs[kind].baseUrl || !modelConfigs[kind].model" @click="testConfiguredModel(kind)"><LoaderCircle v-if="modelTesting === kind" :size="15" class="model-spin" /><CheckCircle2 v-else :size="15" />{{ modelTesting === kind ? "测试中..." : "测试模型" }}</button>
-                <button class="button button-primary" type="button" :disabled="modelSaving === kind || modelTesting === kind" @click="saveModel(kind)"><LoaderCircle v-if="modelSaving === kind" :size="15" class="model-spin" /><Save v-else :size="15" />{{ modelSaving === kind ? "保存中..." : "保存配置" }}</button>
+                <button class="button button-secondary" type="button" :disabled="modelOperations[kind].fetch.pending || !modelConfigs[kind].baseUrl || !modelConfigs[kind].apiKey" @click="fetchModels(kind)"><LoaderCircle v-if="modelOperations[kind].fetch.pending" :size="15" class="model-spin" /><RefreshCw v-else :size="15" />{{ modelOperations[kind].fetch.pending ? "获取中..." : "获取模型列表" }}</button>
+                <button class="button button-secondary" type="button" :disabled="modelOperations[kind].test.pending || !modelConfigs[kind].baseUrl || !modelConfigs[kind].apiKey || !modelConfigs[kind].model" @click="testConfiguredModel(kind)"><LoaderCircle v-if="modelOperations[kind].test.pending" :size="15" class="model-spin" /><CheckCircle2 v-else :size="15" />{{ modelOperations[kind].test.pending ? "测试中..." : "测试模型" }}</button>
+                <button class="button button-primary" type="button" :disabled="modelOperations[kind].save.pending" @click="saveModel(kind)"><LoaderCircle v-if="modelOperations[kind].save.pending" :size="15" class="model-spin" /><Save v-else :size="15" />{{ modelOperations[kind].save.pending ? "保存中..." : "保存配置" }}</button>
               </div>
-              <p v-if="modelFeedback[kind]" class="settings-feedback settings-feedback-success" role="status"><CheckCircle2 :size="15" />{{ modelFeedback[kind] }}</p>
-              <p v-if="modelErrors[kind]" class="settings-feedback settings-feedback-error" role="alert">{{ modelErrors[kind] }}</p>
+              <template v-for="operation in (['fetch', 'test', 'save'] as ModelOperation[])" :key="operation">
+                <p v-if="modelOperations[kind][operation].message" class="settings-feedback" :class="modelOperations[kind][operation].tone === 'error' ? 'settings-feedback-error' : modelOperations[kind][operation].tone === 'success' ? 'settings-feedback-success' : 'model-feedback-notice'" role="status"><CheckCircle2 v-if="modelOperations[kind][operation].tone === 'success'" :size="15" /><Info v-else-if="modelOperations[kind][operation].tone === 'notice'" :size="15" />{{ modelOperations[kind][operation].message }}</p>
+                <p v-if="modelOperations[kind][operation].detail" class="model-test-result" role="status">接口返回：{{ modelOperations[kind][operation].detail }}</p>
+              </template>
             </section>
           </div>
-          <p class="settings-action-hint model-settings-hint">获取模型列表后，可从下拉框选择模型；如果平台不支持模型列表接口，也可以直接填写模型名称。测试只发送内置测试内容，不会写入资料库。</p>
+          <p v-if="modelLoadError" class="settings-feedback settings-feedback-error" role="alert">{{ modelLoadError }}</p>
+          <button v-if="modelLoadError" class="button button-secondary" type="button" :disabled="modelLoading" @click="loadModelSettings"><RefreshCw :size="15" />重新读取模型配置</button>
         </div>
       </section>
 
@@ -314,19 +363,25 @@ onMounted(() => {
 .model-settings-card { align-items: flex-start; }
 .settings-card-subtitle { margin-top: 7px !important; }
 .model-config-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
-.model-config-panel { min-width: 0; padding: 15px; background: var(--surface-alt); border: 1px solid var(--line); border-radius: 10px; }
+.model-config-panel { min-width: 0; padding: 15px 0; border-top: 1px solid var(--line); }
 .model-config-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .model-config-title { display: flex; align-items: center; gap: 7px; color: var(--primary); }
 .model-config-title h4 { margin: 0; color: var(--ink); font-size: 13px; font-weight: 730; }
 .model-switch { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; cursor: pointer; }
 .model-switch input { accent-color: var(--primary); }
-.model-config-description { min-height: 38px; margin-top: 7px !important; font-size: 11px !important; line-height: 1.5 !important; }
+.model-config-description { margin-top: 7px !important; font-size: 11px !important; line-height: 1.5 !important; }
 .model-fields { display: grid; gap: 9px; margin-top: 12px; }
 .model-field { display: grid; gap: 5px; color: var(--muted-strong); font-size: 11px; font-weight: 650; }
 .model-field input, .model-field select { width: 100%; min-height: 34px; padding: 0 9px; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 7px; outline: 0; font-size: 12px; transition: border-color 130ms ease-out, box-shadow 130ms ease-out; }
 .model-field input:focus, .model-field select:focus { border-color: var(--primary); box-shadow: 0 0 0 3px var(--focus); }
 .model-field select:disabled { display: none; }
 .model-manual-input { display: block !important; }
+.model-test-result { margin: 5px 0 0 !important; padding: 7px 9px; color: var(--muted-strong); background: var(--surface); border-radius: 6px; font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }
+.model-feedback-notice { color: var(--muted-strong); }
+.model-config-panel .settings-feedback-success { color: oklch(0.46 0.115 150) !important; }
+:global([data-theme="dark"] .model-config-panel .settings-feedback-success) { color: var(--success) !important; }
+.settings-feedback { overflow-wrap: anywhere; }
+.settings-feedback svg { flex-shrink: 0; }
 .model-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 13px; }
 .model-actions .button { min-height: 32px; padding: 0 9px; font-size: 11px; }
 .model-actions .button-primary { margin-left: auto; }
@@ -338,5 +393,9 @@ onMounted(() => {
 }
 @media (max-width: 540px) {
   .model-actions .button-primary { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .model-spin { animation: none; }
+  .model-field input, .model-field select { transition: none; }
 }
 </style>

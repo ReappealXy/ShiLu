@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
+export type ArticleStatus = "draft" | "active" | "archived";
+export type CaptureStep = 1 | 2 | 3;
+
 export type ArticleDocument = {
   id: string;
   folderName: string;
@@ -12,11 +15,15 @@ export type ArticleDocument = {
   createdAt: string;
   updatedAt: string;
   markdownPath: string;
+  status: ArticleStatus;
+  captureStep: CaptureStep;
+  sourceImages: string[];
 };
 
-export type ArticleDraft = Pick<ArticleDocument, "title" | "summary" | "sourceUrl" | "tags" | "content" | "notes">;
+export type ArticleDraft = Pick<ArticleDocument, "title" | "summary" | "sourceUrl" | "tags" | "content" | "notes">
+  & Partial<Pick<ArticleDocument, "status" | "captureStep" | "sourceImages">>;
 
-export type ArticleSummary = Pick<ArticleDocument, "id" | "folderName" | "title" | "summary" | "sourceUrl" | "tags" | "updatedAt" | "markdownPath">;
+export type ArticleSummary = Pick<ArticleDocument, "id" | "folderName" | "title" | "summary" | "sourceUrl" | "tags" | "updatedAt" | "markdownPath" | "status" | "captureStep" | "sourceImages">;
 
 export type OcrResult = { articleId: string; text: string; imageCount: number; rawPath: string };
 
@@ -28,8 +35,12 @@ export function saveArticle(articleReference: string, draft: ArticleDraft): Prom
   return invoke<ArticleDocument>("save_article", { articleReference, draft });
 }
 
-export function listArticles(query = ""): Promise<ArticleSummary[]> {
-  return invoke<ArticleSummary[]>("list_articles", { query });
+export function listArticles(query = "", status: ArticleStatus = "active"): Promise<ArticleSummary[]> {
+  return invoke<ArticleSummary[]>("list_articles", { query, status });
+}
+
+export function setArticleStatus(articleReference: string, status: ArticleStatus): Promise<ArticleDocument> {
+  return invoke<ArticleDocument>("set_article_status", { articleReference, status });
 }
 
 export function ocrArticleImages(articleReference: string): Promise<OcrResult> {

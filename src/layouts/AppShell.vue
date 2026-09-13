@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
+  Archive,
   ChevronLeft,
   ChevronRight,
   Command,
@@ -16,6 +17,7 @@ import {
   X,
 } from "@lucide/vue";
 import { applyTheme, getStoredTheme, setStoredTheme } from "../services/settings";
+import { getLibraryStatus } from "../services/library";
 
 type CommandItem = {
   label: string;
@@ -36,6 +38,12 @@ const wheelPosition = ref(0);
 const wheelSettled = ref(true);
 const reducedMotion = ref(false);
 const dragging = ref(false);
+const articleSection = ref("");
+const libraryLabel = ref("正在读取");
+async function refreshLibraryLabel() {
+  try { const result = await getLibraryStatus(); libraryLabel.value = result.ready ? "已就绪" : result.configured ? "需要检查" : "未设置"; }
+  catch { libraryLabel.value = "读取失败"; }
+}
 let toastTimer: ReturnType<typeof window.setTimeout> | undefined;
 let snapTimer: ReturnType<typeof window.setTimeout> | undefined;
 let dragStartY: number | undefined;
@@ -46,8 +54,9 @@ let reducedMotionQuery: MediaQueryList | undefined;
 
 const navigation: CommandItem[] = [
   { label: "总览", description: "查看当前资料库状态", to: "/overview", icon: Home },
-  { label: "资料库", description: "浏览和查找已保存资料", to: "/library", icon: Library },
   { label: "新建资料", description: "从截图或手动内容开始", to: "/capture", icon: Plus },
+  { label: "资料库", description: "浏览和查找已保存资料", to: "/library", icon: Library },
+  { label: "归档箱", description: "查看或恢复已归档资料", to: "/archive", icon: Archive },
 ];
 
 const settingsItem: CommandItem = {
@@ -68,14 +77,20 @@ const matchedCommands = computed(() => {
 });
 
 function isNavItemCurrent(item: CommandItem) {
-  const normalizedPath = route.path.startsWith("/articles/") ? "/library" : route.path;
+  const normalizedPath = normalizedNavPath(route.path);
   return normalizedPath === item.to || normalizedPath.startsWith(`${item.to}/`);
 }
 
 function syncSelectedNavItem(path: string) {
-  const normalizedPath = path.startsWith("/articles/") ? "/library" : path;
+  const normalizedPath = normalizedNavPath(path);
   const index = commands.findIndex((item) => normalizedPath === item.to || normalizedPath.startsWith(`${item.to}/`));
   if (index >= 0) settleOnNavItem(index);
+}
+
+function normalizedNavPath(path: string) {
+  if (!path.startsWith("/articles/")) return path;
+  if (articleSection.value) return articleSection.value;
+  return route.query.from === "archive" ? "/archive" : "/library";
 }
 
 function clampNavIndex(index: number) {
@@ -131,7 +146,7 @@ function activateNavItem(index = selectedNavIndex.value) {
 function navItemStyle(index: number) {
   const offset = relativeNavOffset(index);
   const distance = Math.abs(offset);
-  const angle = offset * 0.5;
+  const angle = Math.max(-1.45, Math.min(1.45, offset * 0.5));
   const x = -64 * (1 - Math.cos(angle));
   const y = 150 * Math.sin(angle);
   return {
@@ -142,6 +157,7 @@ function navItemStyle(index: number) {
     "--arc-opacity": `${Math.max(0.12, 1 - distance * 0.42).toFixed(3)}`,
     "--arc-blur": `${Math.max(0, (distance - 0.15) * 0.7).toFixed(2)}px`,
     "--arc-depth": `${Math.round(20 - distance * 5)}`,
+    visibility: !sidebarCollapsed.value && !reducedMotion.value && distance > 2.5 ? "hidden" as const : "visible" as const,
   };
 }
 
@@ -236,6 +252,8 @@ function updateReducedMotion() {
 }
 
 watch(() => route.path, (path) => {
+  articleSection.value = "";
+  void refreshLibraryLabel();
   cancelWheelSnap();
   syncSelectedNavItem(path);
 }, { immediate: true });
@@ -260,8 +278,20 @@ function showToast(message: string) {
   }, 2200);
 }
 
-function navigate(item: CommandItem) {
-  router.push(item.to);
+function onToast(event: Event) {
+  const message = (event as CustomEvent).detail;
+  if (typeof message === "string") showToast(message);
+}
+
+function onArticleStatus(event: Event) {
+  const status = (event as CustomEvent).detail;
+  articleSection.value = status === "archived" ? "/archive" : "/library";
+  syncSelectedNavItem(route.path);
+}
+
+async function navigate(item: CommandItem) {
+  await router.push(item.to);
+  syncSelectedNavItem(route.path);
   query.value = "";
   commandOpen.value = false;
 }
@@ -295,10 +325,14 @@ onMounted(async () => {
   updateReducedMotion();
   reducedMotionQuery.addEventListener?.("change", updateReducedMotion);
   window.addEventListener("keydown", onGlobalKeydown);
+  window.addEventListener("shilu:toast", onToast);
+  window.addEventListener("shilu:article-status", onArticleStatus);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onGlobalKeydown);
+  window.removeEventListener("shilu:toast", onToast);
+  window.removeEventListener("shilu:article-status", onArticleStatus);
   reducedMotionQuery?.removeEventListener?.("change", updateReducedMotion);
   if (toastTimer) window.clearTimeout(toastTimer);
   cancelWheelSnap();
@@ -355,8 +389,7 @@ onBeforeUnmount(() => {
 
       <div class="sidebar-bottom">
         <div v-if="!sidebarCollapsed" class="storage-mini">
-          <div class="storage-mini-heading"><span>本地资料库</span><span>未设置</span></div>
-          <div class="storage-track"><i /></div>
+          <div class="storage-mini-heading"><span>本地资料库</span><span>{{ libraryLabel }}</span></div>
         </div>
         <button v-else class="icon-button expand-button" type="button" title="展开侧边栏" aria-label="展开侧边栏" @click="sidebarCollapsed = false">
           <ChevronRight :size="18" />
@@ -392,7 +425,7 @@ onBeforeUnmount(() => {
           </button>
           <RouterLink to="/settings" class="workspace-status" title="查看设置">
             <span class="workspace-status-icon"><FolderOpen :size="16" /></span>
-            <span><strong>本地资料库</strong><small>等待设置</small></span>
+            <span><strong>本地资料库</strong><small>{{ libraryLabel }}</small></span>
           </RouterLink>
         </div>
       </header>
