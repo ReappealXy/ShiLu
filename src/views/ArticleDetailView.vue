@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { Archive, ArchiveRestore, ArrowLeft, Check, ExternalLink, FileText, LoaderCircle, SquarePen } from "@lucide/vue";
+import { Archive, ArchiveRestore, ArrowLeft, Check, ExternalLink, FileText, LoaderCircle, SquarePen, Trash2 } from "@lucide/vue";
 import { useRoute, useRouter } from "vue-router";
 import { getErrorMessage } from "../services/library";
-import { readArticle, setArticleStatus, type ArticleDocument, type ArticleStatus } from "../services/editor";
+import { deleteArticlePermanently, readArticle, setArticleStatus, type ArticleDocument, type ArticleStatus } from "../services/editor";
 import { cleanDisplayMarkdown, renderArticleMarkdown } from "../services/markdown";
 
 const route = useRoute();
@@ -14,6 +14,7 @@ const loading = ref(true);
 const errorMessage = ref("");
 const feedback = ref("");
 const statusBusy = ref(false);
+const deleteBusy = ref(false);
 
 const status = computed<ArticleStatus>(() => article.value?.status ?? "active");
 const statusLabel = computed(() => ({ draft: "处理中", active: "已收录", archived: "已归档" })[status.value]);
@@ -42,6 +43,23 @@ async function changeStatus(next: ArticleStatus) {
     errorMessage.value = getErrorMessage(error, "状态更新失败，请重试。");
   } finally {
     statusBusy.value = false;
+  }
+}
+
+async function deleteArticle() {
+  if (!article.value || statusBusy.value || deleteBusy.value) return;
+  const title = article.value.title || "未命名资料";
+  if (!window.confirm(`确定永久删除“${title}”吗？\nMarkdown 文件夹及其中的图片都会被删除，且无法恢复。`)) return;
+  deleteBusy.value = true;
+  errorMessage.value = "";
+  try {
+    await deleteArticlePermanently(article.value.folderName);
+    window.dispatchEvent(new CustomEvent("shilu:article-deleted", { detail: article.value.folderName }));
+    await router.replace(returnPath.value);
+  } catch (error) {
+    errorMessage.value = getErrorMessage(error, "永久删除失败，资料仍然保留。请重试。");
+  } finally {
+    deleteBusy.value = false;
   }
 }
 
@@ -77,6 +95,11 @@ onMounted(() => void loadArticle());
           <Archive v-else :size="16" />
           {{ status === 'archived' ? '恢复到资料库' : '归档' }}
         </button>
+        <button class="button button-danger" type="button" :disabled="statusBusy || deleteBusy" @click="deleteArticle">
+          <LoaderCircle v-if="deleteBusy" class="article-detail-spin" :size="16" />
+          <Trash2 v-else :size="16" />
+          {{ deleteBusy ? '正在删除...' : '永久删除' }}
+        </button>
       </div>
     </div>
 
@@ -103,7 +126,6 @@ onMounted(() => void loadArticle());
         </a>
 
         <footer class="article-detail-footer">
-          <span v-if="article.tags.length" class="article-detail-tags"><i v-for="tag in article.tags" :key="tag">{{ tag }}</i></span>
           <time v-if="formatDate(article.updatedAt)" :datetime="article.updatedAt">最后更新 {{ formatDate(article.updatedAt) }}</time>
         </footer>
       </article>
@@ -117,6 +139,8 @@ onMounted(() => void loadArticle());
 .editor-back { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--muted-strong); background: transparent; font-size: 12px; }
 .editor-back:hover { color: var(--primary); }
 .article-detail-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.button-danger { color: var(--danger, #c2413b); border-color: color-mix(in srgb, var(--danger, #c2413b) 35%, var(--line-strong)); background: color-mix(in srgb, var(--danger, #c2413b) 8%, var(--surface)); }
+.button-danger:hover:not(:disabled) { color: #fff; border-color: var(--danger, #c2413b); background: var(--danger, #c2413b); }
 .article-detail-loading { display: flex; min-height: 300px; align-items: center; justify-content: center; gap: 12px; color: var(--muted-strong); }
 .article-detail-spin { animation: article-detail-spin 900ms linear infinite; }
 @keyframes article-detail-spin { to { transform: rotate(360deg); } }
@@ -137,8 +161,6 @@ onMounted(() => void loadArticle());
 .article-detail-empty-body { display: flex; min-height: 220px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted-strong); border-top: 1px solid var(--line); }
 .article-detail-empty-body p { margin: 0 0 4px; }
 .article-detail-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 10px 32px; color: var(--muted); background: var(--surface-alt); border-top: 1px solid var(--line); font-size: 11px; }
-.article-detail-tags { display: flex; flex-wrap: wrap; gap: 5px; }
-.article-detail-tags i { padding: 3px 6px; color: var(--primary); background: var(--primary-soft); border-radius: 4px; font-style: normal; }
 .article-detail-footer time { white-space: nowrap; }
 @media (max-width: 680px) {
   .article-detail-topbar { align-items: flex-start; flex-direction: column; }

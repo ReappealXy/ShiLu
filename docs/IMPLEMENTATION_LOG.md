@@ -474,3 +474,78 @@ Git Description：`阅读页仅显示 Markdown 正文引用的图片，移除 OC
 大白话：OCR 截图只是给模型识字用的，平时看文章不会自动出现；你点“插入正文”后它才会显示，删掉正文里的图片链接后也会消失，原图仍然留在文章文件夹里。
 
 最终打包验收：重新执行 `npm run tauri:build` 成功生成当前代码对应的 Windows x64 NSIS 安装包 [`拾录 ShiLu_0.1.0_x64-setup.exe`](../src-tauri/target/release/bundle/nsis/拾录%20ShiLu_0.1.0_x64-setup.exe)，大小 3,939,364 字节，生成时间 2026-09-13 12:23:04，SHA256：`E37E091B8EEDFABC826AD159BB3ADAC974C36FCC98076CF76C10EB06EEB12DEB`。
+
+## 2026-09-13 增补 16：首页最近资料卡片化
+
+状态：实现、回归检查与 Windows 安装包验收完成。
+
+首页“最近保存的资料”由标题列表改为响应式卡片网格。每张卡片从正文 Markdown 中提取第一张合法的 `images/...` 配图作为封面；没有正文配图时显示统一的无图占位。OCR 源截图仍然不会被当作封面。整张卡片点击进入只读文章阅读页。
+
+卡片增加悬停上浮、封面轻微缩放、操作箭头显现和键盘焦点反馈；标题限制为两行并在窄窗口下自动切换为双列或单列。为避免首页列表接口加载整篇正文，后端摘要新增 `firstContentImage` 字段，仅返回首张正文图片路径。
+
+验证：`npm run build`、`cargo test --manifest-path src-tauri/Cargo.toml --lib`（39 项通过、1 项跳过）、`cargo fmt -- --check` 和 `git diff --check` 通过。
+
+Git Summary：`首页最近资料改为带首图的卡片网格`
+
+Git Description：`从正文 Markdown 提取首张配图用于首页最近资料卡片，保留无图占位并加入悬停与键盘交互反馈；OCR 源图不参与封面展示，适配窄窗口布局。`
+
+大白话：首页最近保存的资料现在是一张张卡片，有正文配图就显示第一张，没有就显示占位；鼠标放上去会有反馈，点整张卡片就能查看文章。
+
+最终打包验收：`npm run tauri:build` 成功生成当前代码对应的 Windows x64 NSIS 安装包 [`拾录 ShiLu_0.1.0_x64-setup.exe`](../src-tauri/target/release/bundle/nsis/拾录%20ShiLu_0.1.0_x64-setup.exe)，大小 3,949,188 字节，生成时间 2026-09-13 17:16:25，SHA256：`D6758213A6132661636C7E79621AEE5EE2939FF297423479B51972991C540D6C`。
+## 2026-09-13 增补 17：简化资料字段与单模型整理
+
+状态：实现与 Windows 安装包验收完成。
+
+新建/编辑资料现在只面向用户显示标题、正文和来源链接；正文支持 Markdown，图片可通过粘贴、选择或拖拽加入，并写入每条资料独立文件夹的 `images` 目录。阅读页与首页/资料库均以文章卡片或渲染后的正文展示，Markdown front matter 不会暴露给普通查看；来源链接固定显示在正文末尾。旧资料的摘要、标签、备注和 OCR 源图字段仍可兼容读取，但新资料不再生成这些冗余字段。资料详情页新增永久删除，会同步删除本地文章文件夹及图片。
+
+设置页收敛为一个“Markdown 整理模型”，支持 API 地址、Key、获取模型列表、下拉选择、当前配置测试和保存；获取、测试、保存互不取消，测试使用点击时的表单快照。保留后端旧 OCR/双模型字段用于兼容历史配置。
+
+验证：`npm run build`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`git diff --check` 均通过；`cargo test --manifest-path src-tauri/Cargo.toml --lib` 为 41 项通过、1 项因需要 Windows OCR fixture 忽略。`npm run tauri:build` 成功生成 Windows x64 NSIS 安装包 [`拾录 ShiLu_0.1.0_x64-setup.exe`](../src-tauri/target/release/bundle/nsis/拾录%20ShiLu_0.1.0_x64-setup.exe)，大小 3,948,598 字节，生成时间 2026-09-13 22:50:02，SHA256：`F9E74E5B09465D6588E16191ACDB56A37337E6D19A4CE35DB8FF0FB044F448DB`。
+
+Git Summary：`简化资料字段并接入 Markdown 整理模型`
+
+Git Description：`新建与编辑聚焦标题正文链接，支持独立资料配图、渲染阅读与永久删除；移除用户可见旧元数据，设置页改为单一 Markdown 整理模型并保留历史配置兼容。`
+
+大白话：以后新增资料只填标题、正文、链接，图片直接粘贴就会跟着这篇资料保存；平时点进去看到的是排版好的文章，想改才进入编辑。设置里只管一个负责整理 Markdown 的模型，能获取模型列表、测试后再保存。永久删除会把本地文件夹一起删掉。
+
+## 2026-09-13 增补 18：最终文案同步与安装包重打
+
+状态：完成。
+
+同步产品文档与界面提示，使软件口径统一为“标题、正文、来源链接、正文配图”和“Markdown 整理模型”。移除残留的“截图或手动内容”和“未进行 OCR”等旧提示，不改变资料保存结构或历史资料兼容逻辑。
+
+验证：`npm run build`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo test --manifest-path src-tauri/Cargo.toml --lib`（41 项通过、1 项因需要 Windows OCR fixture 忽略）和 `git diff --check` 均通过。重新执行 `npm run tauri:build` 成功生成 Windows x64 NSIS 安装包 [`拾录 ShiLu_0.1.0_x64-setup.exe`](../src-tauri/target/release/bundle/nsis/拾录%20ShiLu_0.1.0_x64-setup.exe)，大小 3,943,798 字节，生成时间 2026-09-13 23:04:44，SHA256：`D6CC994F667383CF136F47733DD450A5DE09107185EF98D62022357B15F92254`。
+
+Git Summary：`同步最终资料流程文案并重打 Windows 安装包`
+
+Git Description：`将产品文档和界面提示统一为标题正文链接与正文配图流程，保留 Markdown 整理模型及历史资料兼容；完成前端、Rust 测试和 Windows x64 NSIS 安装包重打。`
+
+大白话：现在软件里的说法和实际功能一致了，不会再把新流程说成截图 OCR。最新安装包已经重新生成，明天直接安装这个包验收即可。
+
+## 2026-09-13 增补 19：新建资料页 Markdown 编辑与 AI 整理
+
+状态：完成。
+
+新建资料页与编辑资料页统一使用 Markdown 编辑器，支持编辑、对照和预览模式，以及标题、粗体、斜体、列表、链接等工具。新建资料页增加“AI 整理为 Markdown”流程：使用设置中的 Markdown 整理模型生成可编辑结果，同时展示渲染预览；用户点击“采用整理结果”后才替换正文，正文在请求期间被修改或模型遗漏图片引用时会阻止覆盖。剪贴板粘贴、文件选择和拖拽配图继续保留，图片保存到独立资料文件夹并在保存时补入正文引用。
+
+验证：`npm run build`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo test --manifest-path src-tauri/Cargo.toml --lib`（41 项通过、1 项因需要 Windows OCR fixture 忽略）和 `git diff --check` 均通过。重新执行 `npm run tauri:build` 成功生成 Windows x64 NSIS 安装包 [`拾录 ShiLu_0.1.0_x64-setup.exe`](../src-tauri/target/release/bundle/nsis/拾录%20ShiLu_0.1.0_x64-setup.exe)，大小 3,942,464 字节，生成时间 2026-09-13 23:16:22，SHA256：`0E480BF8FF203AB2FDEB4F659EB61BAD46FA2E0DAF9BABA9AF4E550712D53681`。
+
+Git Summary：`统一新建页 Markdown 编辑与 AI 整理流程`
+
+Git Description：`新建资料页接入 Markdown 编辑器、预览和可确认的 AI 整理结果，保留剪贴板、文件与拖拽配图导入；完善图片引用校验、正文变更保护，并完成 Windows x64 安装包重打。`
+
+大白话：新增资料时现在就能直接写 Markdown、看排版、贴图片，也能先让 AI 整理后再决定要不要采用；AI 不会直接悄悄覆盖你的原文。最新安装包已包含这次更新。
+
+## 2026-09-13 增补 20：最终安装包验收
+
+状态：完成。
+
+在增补 19 的代码基础上重新执行 Windows x64 NSIS 打包，确认安装包生成成功且与当前工作区代码一致。
+
+最终安装包：[`拾录 ShiLu_0.1.0_x64-setup.exe`](../src-tauri/target/release/bundle/nsis/%E6%8B%BE%E5%BD%95%20ShiLu_0.1.0_x64-setup.exe)，大小 3,942,572 字节，生成时间 2026-09-13 23:28:01，SHA256：`7CA53E0482B722429608EF126E131C80A0594C439A33DBE7464F6F323FF7DAC1`。
+
+Git Summary：`完成最终 Windows 安装包验收`
+
+Git Description：`基于当前资料编辑、Markdown 整理、正文配图与永久删除功能完成最终 Windows x64 NSIS 打包，记录安装包大小、生成时间和 SHA256 校验值。`
+
+大白话：这是目前最新的一版安装包，安装前可以用 SHA256 校验值确认文件没有被替换或损坏。

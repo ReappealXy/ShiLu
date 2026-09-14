@@ -39,6 +39,7 @@ pub fn run() {
             storage::create_capture_draft,
             storage::set_article_status,
             storage::move_article_to_trash,
+            storage::delete_article_permanently,
             storage::import_article_images,
             storage::import_article_sources,
             clipboard::read_clipboard_image,

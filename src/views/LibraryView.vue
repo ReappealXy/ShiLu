@@ -59,6 +59,20 @@ function formatDate(value: string) {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? "未记录时间" : date.toLocaleString("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
+/**
+ * 列表片段使用正文（后端可选返回 content）。
+ * 这里仅做纯文本截取，避免把 Markdown 原始标记直接铺在列表中。
+ */
+function articleExcerpt(article: ArticleSummary) {
+  const source = article.content || "";
+  const plain = source
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/[#>*_`~-]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return plain ? (plain.length > 140 ? `${plain.slice(0, 140)}…` : plain) : "暂无正文内容";
+}
 watch(query, () => {
   ++requestId;
   if (searchTimer) window.clearTimeout(searchTimer);
@@ -74,13 +88,13 @@ onBeforeUnmount(() => { disposed = true; ++requestId; if (searchTimer) window.cl
     <div v-if="loadingStatus" class="collection-empty" role="status"><LoaderCircle :size="24" class="collection-spin" />正在读取{{ heading }}...</div>
     <div v-else-if="!libraryStatus?.ready" class="collection-empty"><LibraryBig :size="30" /><h3>{{ libraryStatus?.configured ? '资料库暂时不可用' : '尚未设置资料库' }}</h3><p v-if="errorMessage" role="alert">{{ errorMessage }}</p><RouterLink class="button button-primary" to="/settings"><Settings :size="16" />设置资料库位置</RouterLink><button class="button button-secondary" type="button" @click="loadLibraryStatus"><RefreshCw :size="16" />重新读取</button></div>
     <template v-else>
-      <div class="library-toolbar"><label class="library-search"><Search :size="17" /><input v-model="query" type="search" :aria-label="`搜索${heading}`" placeholder="搜索标题、正文、标签或链接" /></label><span class="library-result-count" role="status">{{ loadingArticles ? '正在查找...' : `${articles.length} 条资料` }}</span><button class="icon-button" type="button" title="刷新列表" aria-label="刷新列表" :disabled="loadingArticles" @click="loadArticles"><RefreshCw :size="17" /></button></div>
+      <div class="library-toolbar"><label class="library-search"><Search :size="17" /><input v-model="query" type="search" :aria-label="`搜索${heading}`" placeholder="搜索标题、正文或链接" /></label><span class="library-result-count" role="status">{{ loadingArticles ? '正在查找...' : `${articles.length} 条资料` }}</span><button class="icon-button" type="button" title="刷新列表" aria-label="刷新列表" :disabled="loadingArticles" @click="loadArticles"><RefreshCw :size="17" /></button></div>
       <p v-if="successMessage" class="collection-feedback collection-success" role="status"><Check :size="16" />{{ successMessage }}</p>
       <p v-if="errorMessage" class="collection-feedback collection-error" role="alert">{{ errorMessage }}<button type="button" @click="loadArticles">重新读取</button></p>
       <div v-if="!articles.length && !loadingArticles && !errorMessage" class="collection-empty"><Archive v-if="status === 'archived'" :size="30" /><Search v-else :size="30" /><h3>{{ query ? '没有匹配的资料' : status === 'archived' ? '暂时没有归档资料' : '还没有保存的资料' }}</h3><button v-if="query" class="button button-secondary" type="button" @click="query = ''">清除搜索</button><RouterLink v-else-if="status !== 'archived'" class="button button-secondary" to="/capture"><Plus :size="16" />新建资料</RouterLink></div>
       <div class="article-list" :aria-label="`${heading}列表`" :aria-busy="loadingArticles">
         <article v-for="article in articles" :key="article.folderName" class="article-row">
-          <RouterLink class="article-open" :to="articleLink(article)"><span class="article-row-icon"><Archive v-if="status === 'archived'" :size="20" /><LibraryBig v-else :size="20" /></span><span class="article-row-main"><strong>{{ article.title }}</strong><small>{{ article.summary || '暂无摘要' }}</small><span v-if="article.tags.length" class="article-tags"><i v-for="tag in article.tags" :key="tag">{{ tag }}</i></span></span><time class="article-row-date">{{ formatDate(article.updatedAt) }}</time></RouterLink>
+          <RouterLink class="article-open" :to="articleLink(article)"><span class="article-row-icon"><Archive v-if="status === 'archived'" :size="20" /><LibraryBig v-else :size="20" /></span><span class="article-row-main"><strong>{{ article.title }}</strong><small>{{ articleExcerpt(article) }}</small><small v-if="article.sourceUrl" class="article-row-source">{{ article.sourceUrl }}</small></span><time class="article-row-date">{{ formatDate(article.updatedAt) }}</time></RouterLink>
           <button class="icon-button article-status-action" type="button" :title="status === 'archived' ? '恢复到资料库' : '归档'" :aria-label="`${status === 'archived' ? '恢复' : '归档'}：${article.title}`" :disabled="pending.has(article.folderName)" @click="changeStatus(article)"><LoaderCircle v-if="pending.has(article.folderName)" :size="17" class="collection-spin" /><ArchiveRestore v-else-if="status === 'archived'" :size="17" /><Archive v-else :size="17" /></button>
         </article>
       </div>
@@ -103,9 +117,8 @@ onBeforeUnmount(() => { disposed = true; ++requestId; if (searchTimer) window.cl
 .article-row-main strong, .article-row-main small { display: block; overflow-wrap: anywhere; }
 .article-row-main strong { font-size: 14px; }
 .article-row-main small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 5px; color: var(--muted-strong); font-size: 12px; }
+.article-row-main .article-row-source { -webkit-line-clamp: 1; margin-top: 4px; color: var(--primary); font-size: 11px; }
 .article-row-date { color: var(--muted-strong); font-size: 11px; white-space: nowrap; }
-.article-tags { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
-.article-tags i { padding: 2px 5px; border-radius: 4px; color: var(--primary); background: var(--primary-soft); font-size: 11px; font-style: normal; }
 .article-status-action { margin-right: 8px; flex-shrink: 0; }
 .collection-empty { min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--muted-strong); text-align: center; }
 .collection-empty h3 { color: var(--ink); font-size: 16px; margin: 0; }

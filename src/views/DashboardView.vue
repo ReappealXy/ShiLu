@@ -1,19 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { Archive, ArrowRight, FileText, Tags } from "@lucide/vue";
+import { Archive, ArrowRight, FileText, Image as ImageIcon } from "@lucide/vue";
 import { listArticles, type ArticleSummary } from "../services/editor";
 import { getErrorMessage } from "../services/library";
+import { articleImageUrl } from "../services/markdown";
 const articles = ref<ArticleSummary[]>([]);
-const tagCount = ref(0);
+const imageCount = ref(0);
 const archiveCount = ref(0);
 const loading = ref(true);
 const error = ref("");
 const recent = computed(() => articles.value.slice(0, 5));
+function imageUrl(article: ArticleSummary) {
+  return article.firstContentImage ? articleImageUrl(article.markdownPath, article.firstContentImage) : "";
+}
 onMounted(async () => {
   try {
     const [active, archived] = await Promise.all([listArticles(), listArticles("", "archived")]);
     articles.value = active;
-    tagCount.value = new Set(active.flatMap((article) => article.tags)).size;
+    imageCount.value = active.filter((article) => Boolean(article.firstContentImage)).length;
     archiveCount.value = archived.length;
   } catch (value) { error.value = getErrorMessage(value, "无法读取资料库，请到设置中检查保存位置。"); }
   finally { loading.value = false; }
@@ -26,7 +30,7 @@ onMounted(async () => {
       <div>
         <p class="page-eyebrow">个人资料工作台</p>
         <h2 id="dashboard-heading">从一条值得留下的内容开始</h2>
-        <p class="page-description">截图、链接和你的补充，之后都会整理成可阅读的本地资料。</p>
+        <p class="page-description">文字、链接和配图，都可以整理成可阅读的本地资料。</p>
       </div>
       <RouterLink class="button button-primary" to="/capture">
         前往新建资料
@@ -41,9 +45,9 @@ onMounted(async () => {
         <span class="overview-stat-label">已收录资料</span>
       </article>
       <article class="overview-stat">
-        <span class="overview-stat-icon"><Tags :size="19" aria-hidden="true" /></span>
-        <span class="overview-stat-value">{{ loading || error ? '—' : tagCount }}</span>
-        <span class="overview-stat-label">已建立标签</span>
+        <span class="overview-stat-icon"><ImageIcon :size="19" aria-hidden="true" /></span>
+        <span class="overview-stat-value">{{ loading || error ? '—' : imageCount }}</span>
+        <span class="overview-stat-label">含配图资料</span>
       </article>
       <article class="overview-stat">
         <span class="overview-stat-icon"><FileText :size="19" aria-hidden="true" /></span>
@@ -64,16 +68,41 @@ onMounted(async () => {
         <span class="empty-state-icon"><Archive :size="26" aria-hidden="true" /></span>
         <p>资料保存后会显示在这里，方便你回看最近整理的内容。</p>
       </div>
-      <ol v-else class="dashboard-recent"><li v-for="item in recent" :key="item.folderName"><RouterLink :to="`/articles/${item.folderName}`"><span>{{ item.title }}</span><ArrowRight :size="16" /></RouterLink></li></ol>
+      <div v-else class="dashboard-recent" aria-label="最近保存的资料">
+        <RouterLink v-for="item in recent" :key="item.folderName" class="dashboard-recent-card" :to="`/articles/${item.folderName}`">
+          <span class="dashboard-card-media">
+            <img v-if="imageUrl(item)" :src="imageUrl(item)" :alt="`${item.title} 的正文配图`" loading="lazy" />
+            <span v-else class="dashboard-card-placeholder" aria-hidden="true"><ImageIcon :size="25" /></span>
+            <span class="dashboard-card-overlay" aria-hidden="true"><ArrowRight :size="18" /></span>
+          </span>
+          <span class="dashboard-card-footer">
+            <strong>{{ item.title || '未命名资料' }}</strong>
+            <ArrowRight class="dashboard-card-arrow" :size="16" aria-hidden="true" />
+          </span>
+        </RouterLink>
+      </div>
     </section>
   </section>
 </template>
 
 <style scoped>
-.dashboard-recent { margin: 0; padding: 0 24px 18px; list-style: none; }
-.dashboard-recent a { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 0; border-top: 1px solid var(--line); color: var(--ink); font-size: 14px; text-decoration: none; }
-.dashboard-recent span { overflow-wrap: anywhere; }
-.dashboard-recent a:hover { color: var(--primary); }
+.dashboard-recent { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 250px)); gap: 14px; margin: 0; padding: 0 24px 24px; }
+.dashboard-recent-card { display: block; min-width: 0; overflow: hidden; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; text-decoration: none; transition: border-color 180ms ease-out, box-shadow 180ms ease-out, transform 180ms ease-out; }
+.dashboard-recent-card:hover { border-color: var(--line-strong); box-shadow: var(--shadow-sm); transform: translateY(-3px); }
+.dashboard-recent-card:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+.dashboard-card-media { position: relative; display: block; aspect-ratio: 16 / 9; overflow: hidden; background: var(--surface-alt); }
+.dashboard-card-media img { display: block; width: 100%; height: 100%; object-fit: cover; transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1); }
+.dashboard-recent-card:hover .dashboard-card-media img { transform: scale(1.035); }
+.dashboard-card-placeholder { display: grid; width: 100%; height: 100%; place-items: center; color: var(--primary); background: var(--primary-soft); }
+.dashboard-card-overlay { position: absolute; right: 10px; bottom: 10px; display: grid; width: 32px; height: 32px; place-items: center; color: var(--primary); background: var(--surface); border-radius: 8px; opacity: 0; transform: translateY(4px); transition: opacity 180ms ease-out, transform 180ms ease-out; }
+.dashboard-recent-card:hover .dashboard-card-overlay, .dashboard-recent-card:focus-visible .dashboard-card-overlay { opacity: 1; transform: translateY(0); }
+.dashboard-card-footer { display: flex; min-height: 58px; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 13px; }
+.dashboard-card-footer strong { display: -webkit-box; min-width: 0; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; font-size: 14px; line-height: 1.45; overflow-wrap: anywhere; }
+.dashboard-card-arrow { flex: 0 0 auto; color: var(--muted); transition: color 180ms ease-out, transform 180ms ease-out; }
+.dashboard-recent-card:hover .dashboard-card-arrow, .dashboard-recent-card:focus-visible .dashboard-card-arrow { color: var(--primary); transform: translateX(2px); }
 .dashboard-error { padding: 0 24px 24px; font-size: 13px; color: var(--muted-strong); }
 .dashboard-error a { color: var(--primary); }
+@media (max-width: 620px) { .dashboard-recent { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-right: 14px; padding-left: 14px; } .dashboard-card-footer { padding-right: 10px; padding-left: 10px; } }
+@media (max-width: 400px) { .dashboard-recent { grid-template-columns: 1fr; } }
+@media (prefers-reduced-motion: reduce) { .dashboard-recent-card, .dashboard-card-media img, .dashboard-card-overlay, .dashboard-card-arrow { transition: none; } }
 </style>

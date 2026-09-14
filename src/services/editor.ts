@@ -20,10 +20,14 @@ export type ArticleDocument = {
   sourceImages: string[];
 };
 
-export type ArticleDraft = Pick<ArticleDocument, "title" | "summary" | "sourceUrl" | "tags" | "content" | "notes">
-  & Partial<Pick<ArticleDocument, "status" | "captureStep" | "sourceImages">>;
+/** Payload accepted when saving. Legacy metadata remains optional for old files. */
+export type ArticleDraft = Pick<ArticleDocument, "title" | "sourceUrl" | "content">
+  & Partial<Pick<ArticleDocument, "summary" | "tags" | "notes" | "status" | "captureStep" | "sourceImages">>;
 
-export type ArticleSummary = Pick<ArticleDocument, "id" | "folderName" | "title" | "summary" | "sourceUrl" | "tags" | "updatedAt" | "markdownPath" | "status" | "captureStep" | "sourceImages">;
+export type ArticleSummary = Pick<ArticleDocument, "id" | "folderName" | "title" | "summary" | "sourceUrl" | "tags" | "updatedAt" | "markdownPath" | "status" | "captureStep" | "sourceImages"> & {
+  firstContentImage: string | null;
+  content?: string;
+};
 
 export type OcrResult = { articleId: string; text: string; imageCount: number; rawPath: string };
 
@@ -41,6 +45,11 @@ export function listArticles(query = "", status: ArticleStatus = "active"): Prom
 
 export function setArticleStatus(articleReference: string, status: ArticleStatus): Promise<ArticleDocument> {
   return invoke<ArticleDocument>("set_article_status", { articleReference, status });
+}
+
+/** Permanently removes an article folder, markdown file, and associated images. */
+export function deleteArticlePermanently(articleReference: string): Promise<void> {
+  return invoke<void>("delete_article_permanently", { articleReference });
 }
 
 export function ocrArticleImages(articleReference: string): Promise<OcrResult> {

@@ -182,6 +182,9 @@ pub struct ArticleSummary {
     pub status: ArticleStatus,
     pub capture_step: u8,
     pub source_images: Vec<String>,
+    pub first_content_image: Option<String>,
+    /// 正文纯文本来源，供列表卡片显示片段；旧客户端可忽略此字段。
+    pub content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -384,6 +387,18 @@ pub fn move_article_to_trash(
 
     let root = configured_ready_library(&app)?;
     move_article_to_trash_at(&root, &folder_name)
+}
+
+/// Permanently remove an article folder from the active library or recycle bin.
+///
+/// The reference may be a full folder name (recommended) or a six character
+/// article id.  We only ever delete directories that are direct children of
+/// `articles` or `.shilu-trash`, preventing path traversal and accidental
+/// deletion outside the configured library.
+#[tauri::command]
+pub fn delete_article_permanently(app: AppHandle, article_reference: String) -> StorageResult<()> {
+    let root = configured_ready_library(&app)?;
+    delete_article_permanently_at(&root, &article_reference)
 }
 
 #[tauri::command]
@@ -780,6 +795,76 @@ fn move_article_to_trash_at(root: &Path, folder_name: &str) -> StorageResult<Tra
         folder_name: folder_name.to_string(),
         trash_path: path_to_string(&trash_path)?,
     })
+}
+
+pub(crate) fn delete_article_permanently_at(
+    root: &Path,
+    article_reference: &str,
+) -> StorageResult<()> {
+    let reference = article_reference.trim();
+    if reference.is_empty()
+        || (!is_valid_article_folder_name(reference) && !is_valid_article_id(reference))
+    {
+        return Err(StorageError::new(
+            "INVALID_ARTICLE_REFERENCE",
+            "文章标识必须是完整文件夹名或 6 位资料 ID。",
+        ));
+    }
+
+    let mut matches = Vec::new();
+    for directory in [ARTICLES_DIR_NAME, TRASH_DIR_NAME] {
+        let base = fs::canonicalize(root.join(directory))
+            .map_err(|error| StorageError::io("无法读取文章目录", error))?;
+        if is_valid_article_folder_name(reference) {
+            let candidate = base.join(reference);
+            if candidate.is_dir() {
+                let canonical = fs::canonicalize(&candidate)
+                    .map_err(|error| StorageError::io("无法确认文章路径", error))?;
+                if canonical.starts_with(&base) {
+                    matches.push(canonical);
+                }
+            }
+        } else {
+            for entry in fs::read_dir(&base)
+                .map_err(|error| StorageError::io("无法扫描文章目录", error))?
+                .flatten()
+            {
+                let path = entry.path();
+                let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                if path.is_dir()
+                    && is_valid_article_folder_name(&name)
+                    && article_id_from_folder_name(&name) == Some(reference)
+                {
+                    let canonical = fs::canonicalize(&path)
+                        .map_err(|error| StorageError::io("无法确认文章路径", error))?;
+                    if canonical.starts_with(&base) {
+                        matches.push(canonical);
+                    }
+                }
+            }
+        }
+    }
+
+    matches.sort();
+    matches.dedup();
+    let target = match matches.as_slice() {
+        [] => {
+            return Err(StorageError::new(
+                "ARTICLE_NOT_FOUND",
+                "未找到要永久删除的文章。",
+            ))
+        }
+        [single] => single,
+        _ => {
+            return Err(StorageError::new(
+                "AMBIGUOUS_ARTICLE_ID",
+                "资料 ID 对应多个文章文件夹，请改用完整文件夹名。",
+            ))
+        }
+    };
+    fs::remove_dir_all(target).map_err(|error| StorageError::io("无法永久删除文章", error))
 }
 
 struct ValidatedImageSource {
@@ -1371,6 +1456,8 @@ fn list_articles_at(
             status: document.status,
             capture_step: document.capture_step,
             source_images: document.source_images,
+            first_content_image: first_content_image(&document.content),
+            content: document.content,
         });
     }
     articles.sort_by(|left, right| {
@@ -1380,6 +1467,54 @@ fn list_articles_at(
             .then_with(|| left.title.cmp(&right.title))
     });
     Ok(articles)
+}
+
+fn first_content_image(content: &str) -> Option<String> {
+    let mut remaining = content;
+    while let Some(marker) = remaining.find("![") {
+        let after_marker = &remaining[marker + 2..];
+        let Some(destination_start) = after_marker.find("](") else {
+            remaining = after_marker;
+            continue;
+        };
+        let destination = &after_marker[destination_start + 2..];
+        let Some(end) = destination.find(')') else {
+            return None;
+        };
+        let raw_target = destination[..end]
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let target = raw_target
+            .strip_prefix('<')
+            .and_then(|value| value.strip_suffix('>'))
+            .unwrap_or(raw_target);
+        if is_valid_content_image_path(target) {
+            return Some(target.to_string());
+        }
+        remaining = &destination[end + 1..];
+    }
+    None
+}
+
+fn is_valid_content_image_path(relative: &str) -> bool {
+    let Some(file_name) = relative.strip_prefix("images/") else {
+        return false;
+    };
+    if file_name.is_empty()
+        || !file_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+    {
+        return false;
+    }
+    file_name
+        .rsplit_once('.')
+        .map(|(_, extension)| {
+            ALLOWED_IMAGE_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(windows)]
@@ -1526,7 +1661,25 @@ fn parse_article_markdown(markdown: &str, article_id: &str, folder_name: &str) -
         .find_map(|line| line.strip_prefix("source_images:"))
         .and_then(|value| serde_json::from_str::<Vec<String>>(value.trim()).ok())
         .unwrap_or_default();
-    let content = section_body(body, "正文");
+    // New documents store the body directly below the title heading. Keep
+    // parsing the legacy `## 正文`/`## 我的备注` sections for compatibility.
+    let content = {
+        let legacy = section_body(body, "正文");
+        if !legacy.is_empty() {
+            legacy
+        } else {
+            let mut plain = body.trim();
+            if let Some(rest) = plain.strip_prefix('#') {
+                if let Some((_, after_heading)) = rest.split_once('\n') {
+                    plain = after_heading.trim();
+                }
+            }
+            if let Some((before, _)) = plain.rsplit_once("\n---\n") {
+                plain = before.trim();
+            }
+            plain.to_string()
+        }
+    };
     let notes = section_body(body, "我的备注");
     ArticleDocument {
         id: article_id.to_string(),
@@ -1547,6 +1700,33 @@ fn parse_article_markdown(markdown: &str, article_id: &str, folder_name: &str) -
 }
 
 fn render_article_markdown(document: &ArticleDocument) -> String {
+    // New资料只写用户真正维护的字段；旧资料如果仍有摘要/标签/备注或源图元数据，
+    // 则继续保留旧 front matter，确保升级后读取与再次保存不丢数据。
+    let has_legacy_metadata = !document.summary.trim().is_empty()
+        || !document.tags.is_empty()
+        || !document.notes.trim().is_empty()
+        || !document.source_images.is_empty();
+    if !has_legacy_metadata {
+        let mut output = format!(
+            "---\nid: \"{}\"\ntitle: \"{}\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\nstatus: \"{}\"\n---\n\n# {}\n\n{}\n",
+            escape_yaml(&document.id),
+            escape_yaml(&document.title),
+            escape_yaml(&document.created_at),
+            escape_yaml(&document.updated_at),
+            escape_yaml(&document.source_url),
+            document.status.as_str(),
+            document.title,
+            document.content.trim(),
+        );
+        if !document.source_url.trim().is_empty() {
+            output.push_str(&format!(
+                "\n---\n\n来源：[{}]({})\n",
+                document.source_url.trim(),
+                document.source_url.trim()
+            ));
+        }
+        return output;
+    }
     let tags = if document.tags.is_empty() {
         "[]".to_string()
     } else {
@@ -1562,8 +1742,8 @@ fn render_article_markdown(document: &ArticleDocument) -> String {
     };
     let source_images = serde_json::to_string(&document.source_images)
         .expect("string arrays can always be serialized");
-    format!(
-        "---\nid: \"{}\"\ntitle: \"{}\"\nsummary: \"{}\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\ntags: {}\nstatus: \"{}\"\ncapture_step: {}\nsource_images: {}\n---\n\n# {}\n\n## 正文\n\n{}\n\n## 我的备注\n\n{}\n",
+    let mut output = format!(
+        "---\nid: \"{}\"\ntitle: \"{}\"\nsummary: \"{}\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\ntags: {}\nstatus: \"{}\"\ncapture_step: {}\nsource_images: {}\n---\n\n# {}\n\n## 正文\n\n{}\n",
         escape_yaml(&document.id),
         escape_yaml(&document.title),
         escape_yaml(&document.summary),
@@ -1575,9 +1755,19 @@ fn render_article_markdown(document: &ArticleDocument) -> String {
         document.capture_step,
         source_images,
         document.title,
-        document.content,
-        document.notes
-    )
+        document.content.trim(),
+    );
+    if !document.notes.trim().is_empty() {
+        output.push_str(&format!("\n## 我的备注\n\n{}\n", document.notes.trim()));
+    }
+    if !document.source_url.trim().is_empty() {
+        output.push_str(&format!(
+            "\n---\n\n来源：[{}]({})\n",
+            document.source_url.trim(),
+            document.source_url.trim()
+        ));
+    }
+    output
 }
 
 fn yaml_value(front_matter: &str, key: &str) -> Option<String> {
@@ -1626,13 +1816,20 @@ fn section_body(body: &str, heading: &str) -> String {
     };
     let rest = rest.trim_start_matches([' ', '\n', '\r']);
     if heading == "正文" {
-        return rest
+        let content = rest
             .rsplit_once("\n## 我的备注\n")
             .map_or(rest, |(content, _)| content)
+            .trim();
+        return content
+            .rsplit_once("\n---\n")
+            .map_or(content, |(content, _)| content)
             .trim()
             .to_string();
     }
-    rest.trim().to_string()
+    rest.rsplit_once("\n---\n")
+        .map_or(rest, |(content, _)| content)
+        .trim()
+        .to_string()
 }
 
 fn clean_tags(tags: Vec<String>) -> Vec<String> {
@@ -1812,7 +2009,7 @@ fn write_bytes_atomic(path: &Path, content: &[u8]) -> StorageResult<()> {
 fn create_markdown(title: &str, source_url: Option<&str>, id: &str, timestamp: &str) -> String {
     let source_url = source_url.unwrap_or("").trim();
     format!(
-        "---\nid: \"{}\"\ntitle: \"{}\"\nsummary: \"\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\ntags: []\n---\n\n# {}\n\n## 正文\n\n\n## 我的备注\n\n",
+        "---\nid: \"{}\"\ntitle: \"{}\"\ncreated_at: \"{}\"\nupdated_at: \"{}\"\nsource_url: \"{}\"\nstatus: \"active\"\n---\n\n# {}\n\n",
         escape_yaml(id),
         escape_yaml(title),
         escape_yaml(timestamp),
@@ -1966,6 +2163,37 @@ mod tests {
         assert!(list_articles_at(&library.0, "", ArticleStatus::Draft)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn article_summary_uses_first_markdown_content_image_only() {
+        assert_eq!(
+            first_content_image("![OCR 源图](raw/001.png)\n\n![正文配图](images/003.png)"),
+            Some("images/003.png".to_string())
+        );
+        assert_eq!(
+            first_content_image("![无效](images/../secret.png)\n\n![也无效](images/001.gif)"),
+            None
+        );
+
+        let library = LifecycleTestLibrary::new("summary-content-image");
+        let skeleton = create_article_skeleton_at(&library.0, "带配图资料", None).unwrap();
+        save_article_at(
+            &library.0,
+            &skeleton.folder_name,
+            ArticleDraft {
+                title: "带配图资料".into(),
+                content: "正文\n\n![配图](images/001.png)".into(),
+                ..ArticleDraft::default()
+            },
+        )
+        .unwrap();
+        let summaries = list_articles_at(&library.0, "", ArticleStatus::Active).unwrap();
+        assert_eq!(
+            summaries[0].first_content_image.as_deref(),
+            Some("images/001.png")
+        );
+        assert!(summaries[0].source_images.is_empty());
     }
 
     #[test]
@@ -2473,7 +2701,7 @@ mod tests {
             let markdown = fs::read_to_string(&article.markdown_path)
                 .map_err(|error| StorageError::io("无法读取测试文章", error))?;
             assert!(markdown.contains("title: \"Telegram 收藏内容\""));
-            assert!(markdown.contains("## 正文"));
+            assert!(!markdown.contains("## 正文"));
             assert!(markdown.contains("https://example.com"));
 
             let moved = move_article_to_trash_at(&root, &article.folder_name)?;
@@ -2497,6 +2725,51 @@ mod tests {
         assert!(!is_valid_article_folder_name(
             "20260908-201530-UPPER-ab12ef"
         ));
+    }
+
+    #[test]
+    fn permanently_deletes_active_and_trashed_articles() {
+        let root = temporary_library_root("permanent-delete");
+        fs::create_dir_all(&root).expect("应创建测试目录");
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let active = create_article_skeleton_at(&root, "永久删除", None)?;
+            let image = Path::new(&active.folder_path)
+                .join("images")
+                .join("001.png");
+            fs::write(&image, b"test").unwrap();
+            delete_article_permanently_at(&root, &active.folder_name)?;
+            assert!(!Path::new(&active.folder_path).exists());
+
+            let trashed = create_article_skeleton_at(&root, "回收站删除", None)?;
+            move_article_to_trash_at(&root, &trashed.folder_name)?;
+            delete_article_permanently_at(&root, &trashed.folder_name)?;
+            assert!(!root
+                .join(TRASH_DIR_NAME)
+                .join(&trashed.folder_name)
+                .exists());
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result.expect("永久删除应移除文章文件夹及其图片");
+        cleanup.expect("应清理精确的测试目录");
+    }
+
+    #[test]
+    fn permanent_delete_rejects_path_traversal_and_ambiguous_id() {
+        let root = temporary_library_root("permanent-delete-safety");
+        fs::create_dir_all(&root).expect("应创建测试目录");
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let traversal = delete_article_permanently_at(&root, "..\\outside").unwrap_err();
+            assert_eq!(traversal.code, "INVALID_ARTICLE_REFERENCE");
+            let missing = delete_article_permanently_at(&root, "abcdef").unwrap_err();
+            assert_eq!(missing.code, "ARTICLE_NOT_FOUND");
+            Ok(())
+        })();
+        let cleanup = fs::remove_dir_all(&root);
+        result.expect("永久删除安全校验应通过");
+        cleanup.expect("应清理精确的测试目录");
     }
 
     #[test]

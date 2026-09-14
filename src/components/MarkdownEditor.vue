@@ -54,11 +54,14 @@ defineExpose({ insert, rememberSelection });
     <div class="markdown-panes" :class="`markdown-${mode}`">
       <textarea v-show="mode !== 'preview'" ref="input" :value="modelValue" :disabled="disabled" class="editor-content" aria-label="Markdown 正文" spellcheck="false" @input="onInput" @select="rememberSelection" @keyup="rememberSelection" @click="rememberSelection" @paste="onPaste" />
       <article v-show="mode !== 'edit'" class="editor-preview markdown-body" aria-label="整篇资料预览" tabindex="0" @paste="onPaste">
-        <header v-if="props.previewTitle || props.previewSourceUrl" class="markdown-preview-header">
+        <header v-if="props.previewTitle" class="markdown-preview-header">
           <h1 v-if="props.previewTitle">{{ props.previewTitle }}</h1>
-          <a v-if="props.previewSourceUrl" :href="props.previewSourceUrl" target="_blank" rel="noopener noreferrer">{{ props.previewSourceUrl }}</a>
         </header>
         <div v-html="html" />
+        <footer v-if="props.previewSourceUrl" class="markdown-preview-source">
+          <span>来源：</span>
+          <a :href="props.previewSourceUrl" target="_blank" rel="noopener noreferrer">{{ props.previewSourceUrl }}</a>
+        </footer>
       </article>
     </div>
   </section>
@@ -78,7 +81,8 @@ defineExpose({ insert, rememberSelection });
 .markdown-split { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .markdown-preview-header { margin-bottom: 24px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
 .markdown-preview-header h1 { margin: 0; color: var(--ink); font-size: clamp(22px, 3vw, 32px); line-height: 1.3; overflow-wrap: anywhere; }
-.markdown-preview-header a { display: inline-block; max-width: 100%; margin-top: 10px; color: var(--primary); font-size: 13px; overflow-wrap: anywhere; }
+.markdown-preview-source { display: flex; max-width: 100%; align-items: baseline; gap: 4px; margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted-strong); font-size: 13px; overflow-wrap: anywhere; }
+.markdown-preview-source a { color: var(--primary); overflow-wrap: anywhere; }
 .editor-content { width: 100%; min-height: 400px; padding: 20px 16px; resize: vertical; border: 0; border-radius: 0; color: var(--ink); background: var(--surface); font-family: Consolas, monospace; font-size: 14px; line-height: 1.8; }
 .editor-content:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .editor-preview { min-width: 0; padding: 20px; background: var(--surface-alt); }

@@ -54,7 +54,7 @@ let reducedMotionQuery: MediaQueryList | undefined;
 
 const navigation: CommandItem[] = [
   { label: "总览", description: "查看当前资料库状态", to: "/overview", icon: Home },
-  { label: "新建资料", description: "从截图或手动内容开始", to: "/capture", icon: Plus },
+  { label: "新建资料", description: "从文字、链接或配图开始", to: "/capture", icon: Plus },
   { label: "资料库", description: "浏览和查找已保存资料", to: "/library", icon: Library },
   { label: "归档箱", description: "查看或恢复已归档资料", to: "/archive", icon: Archive },
 ];

@@ -11,7 +11,6 @@ import {
   MonitorCog,
   RefreshCw,
   Save,
-  ScanText,
   Settings2,
   Sparkles,
 } from "@lucide/vue";
@@ -30,7 +29,6 @@ import {
   saveSingleModelSettings,
   testModel,
   type ModelConfig,
-  type ModelKind,
 } from "../services/model";
 
 const libraryStatus = ref<LibraryStatus | null>(null);
@@ -42,31 +40,17 @@ const errorMessage = ref("");
 const successMessage = ref("");
 
 const defaultModel = (): ModelConfig => ({ enabled: false, baseUrl: "", apiKey: "", model: "" });
-const modelConfigs = ref<Record<ModelKind, ModelConfig>>({ ocr: defaultModel(), polish: defaultModel() });
-const modelOptions = ref<Record<ModelKind, string[]>>({ ocr: [], polish: [] });
+const modelConfig = ref<ModelConfig>(defaultModel());
+const modelOptions = ref<string[]>([]);
 const modelLoading = ref(true);
 type ModelOperation = "fetch" | "test" | "save";
 type OperationState = { pending: boolean; message: string; detail: string; tone: "success" | "error" | "notice" };
 const newOperation = (): OperationState => ({ pending: false, message: "", detail: "", tone: "notice" });
-const newOperations = () => ({ fetch: newOperation(), test: newOperation(), save: newOperation() });
-const modelOperations = ref<Record<ModelKind, Record<ModelOperation, OperationState>>>({ ocr: newOperations(), polish: newOperations() });
+const modelOperations = ref<Record<ModelOperation, OperationState>>({ fetch: newOperation(), test: newOperation(), save: newOperation() });
 const modelLoadError = ref("");
-const modelListConnections = ref<Record<ModelKind, string>>({ ocr: "", polish: "" });
 let active = true;
 
 onUnmounted(() => { active = false; });
-
-function modelTitle(kind: ModelKind) {
-  return kind === "ocr" ? "OCR 识别模型" : "文案润色模型";
-}
-
-function modelDescription(kind: ModelKind) {
-  return kind === "ocr" ? "识别截图中的文字。测试会校验一张内置文字图。" : "润色当前编辑的正文。测试会返回一段示例润色结果。";
-}
-
-function modelConfig(kind: ModelKind) {
-  return modelConfigs.value[kind];
-}
 
 function connectionSignature(config: ModelConfig) {
   return JSON.stringify([config.baseUrl.trim(), config.apiKey.trim()]);
@@ -76,12 +60,12 @@ function configSignature(config: ModelConfig) {
   return JSON.stringify([connectionSignature(config), config.model.trim(), config.enabled]);
 }
 
-function availableModels(kind: ModelKind) {
-  return modelListConnections.value[kind] === connectionSignature(modelConfig(kind)) ? modelOptions.value[kind] : [];
+function availableModels() {
+  return modelOptions.value;
 }
 
-function startOperation(kind: ModelKind, operation: ModelOperation) {
-  const state = modelOperations.value[kind][operation];
+function startOperation(operation: ModelOperation) {
+  const state = modelOperations.value[operation];
   if (state.pending) return null;
   Object.assign(state, { pending: true, message: "", detail: "", tone: "notice" });
   return state;
@@ -93,8 +77,8 @@ async function loadModelSettings() {
   try {
     const settings = await getModelSettings();
     if (!active) return;
-    modelConfigs.value.ocr = { ...defaultModel(), ...(settings.ocrModel ?? {}) };
-    modelConfigs.value.polish = { ...defaultModel(), ...(settings.polishModel ?? {}) };
+    // Reuse an older OCR-only configuration when no Markdown model was saved yet.
+    modelConfig.value = { ...defaultModel(), ...(settings.polishModel ?? settings.ocrModel ?? {}) };
   } catch (error) {
     if (active) modelLoadError.value = getErrorMessage(error, "无法读取模型设置，请重试。");
   } finally {
@@ -102,16 +86,16 @@ async function loadModelSettings() {
   }
 }
 
-async function saveModel(kind: ModelKind) {
-  const state = startOperation(kind, "save");
+async function saveModel() {
+  const state = startOperation("save");
   if (!state) return;
-  const snapshot = { ...modelConfig(kind) };
+  const snapshot = { ...modelConfig.value };
   try {
-    await saveSingleModelSettings(kind, snapshot);
+    await saveSingleModelSettings("polish", snapshot);
     if (!active) return;
-    const unchanged = configSignature(snapshot) === configSignature(modelConfig(kind));
+    const unchanged = configSignature(snapshot) === configSignature(modelConfig.value);
     state.tone = unchanged ? "success" : "notice";
-    state.message = unchanged ? `${modelTitle(kind)}配置已保存。` : "已保存点击时的配置；之后的修改尚未保存。";
+    state.message = unchanged ? "Markdown 整理模型配置已保存。" : "已保存点击时的配置；之后的修改尚未保存。";
   } catch (error) {
     if (!active) return;
     state.tone = "error";
@@ -121,21 +105,20 @@ async function saveModel(kind: ModelKind) {
   }
 }
 
-async function fetchModels(kind: ModelKind) {
-  const state = startOperation(kind, "fetch");
+async function fetchModels() {
+  const state = startOperation("fetch");
   if (!state) return;
-  const snapshot = { ...modelConfig(kind) };
+  const snapshot = { ...modelConfig.value };
   try {
     const result = await fetchModelList(snapshot);
     if (!active) return;
-    if (connectionSignature(snapshot) !== connectionSignature(modelConfig(kind))) {
+    if (connectionSignature(snapshot) !== connectionSignature(modelConfig.value)) {
       state.message = "地址或 Key 已变更，旧连接的列表未应用，请重新获取。";
       return;
     }
-    modelOptions.value[kind] = [...new Set(result.models.filter(model => model.trim()))].sort();
-    modelListConnections.value[kind] = connectionSignature(snapshot);
-    state.tone = modelOptions.value[kind].length ? "success" : "notice";
-    state.message = modelOptions.value[kind].length ? `已获取 ${modelOptions.value[kind].length} 个模型。` : "接口返回空列表，请手动填写模型名称。";
+    modelOptions.value = [...new Set(result.models.filter(model => model.trim()))].sort();
+    state.tone = modelOptions.value.length ? "success" : "notice";
+    state.message = modelOptions.value.length ? `已获取 ${modelOptions.value.length} 个模型。` : "接口返回空列表，请手动填写模型名称。";
   } catch (error) {
     if (!active) return;
     state.tone = "error";
@@ -145,21 +128,21 @@ async function fetchModels(kind: ModelKind) {
   }
 }
 
-async function testConfiguredModel(kind: ModelKind) {
-  const state = startOperation(kind, "test");
+async function testConfiguredModel() {
+  const state = startOperation("test");
   if (!state) return;
-  const snapshot = { ...modelConfig(kind) };
+  const snapshot = { ...modelConfig.value };
   try {
-    const result = await testModel(kind, snapshot);
+    const result = await testModel("polish", snapshot);
     if (!active) return;
-    const unchanged = configSignature(snapshot) === configSignature(modelConfig(kind));
+    const unchanged = configSignature(snapshot) === configSignature(modelConfig.value);
     state.tone = unchanged ? "success" : "notice";
-    state.message = `${snapshot.model} ${kind === "ocr" ? "图片文字识别" : "文案润色"}测试成功。${unchanged ? "" : "配置已变更，此结果仅对应测试时的配置。"}`;
+    state.message = `${snapshot.model || "所选模型"} Markdown 整理测试成功。${unchanged ? "" : "配置已变更，此结果仅对应测试时的配置。"}`;
     state.detail = result;
   } catch (error) {
     if (!active) return;
     state.tone = "error";
-    state.message = `${snapshot.model || modelTitle(kind)} 测试失败：${getErrorMessage(error, "请检查地址、Key 和所选模型后重试。")}`;
+    state.message = `${snapshot.model || "Markdown 整理模型"} 测试失败：${getErrorMessage(error, "请检查地址、Key 和所选模型后重试。")}`;
   } finally {
     state.pending = false;
   }
@@ -251,7 +234,7 @@ onMounted(() => {
       <div>
         <p class="page-eyebrow">工作区偏好</p>
         <h2 id="settings-heading">设置</h2>
-        <p class="page-description">在这里选择本地资料库。你的 Markdown、图片和原始识别结果都会保存在这个文件夹内。</p>
+        <p class="page-description">在这里选择本地资料库。你的 Markdown 正文和配图都会保存在这个文件夹内。</p>
       </div>
     </div>
 
@@ -289,7 +272,7 @@ onMounted(() => {
               {{ creatingTestArticle ? "正在创建测试资料..." : "创建测试资料" }}
             </button>
           </div>
-          <p v-if="libraryIsReady" class="settings-action-hint">更换资料库时请选择空文件夹；软件会自动搬迁 Markdown、图片、OCR 原文和设置索引，旧目录不会在迁移完成前删除。</p>
+          <p v-if="libraryIsReady" class="settings-action-hint">更换资料库时请选择空文件夹；软件会自动搬迁 Markdown、图片和设置索引，旧目录不会在迁移完成前删除。</p>
           <p v-if="successMessage" class="settings-feedback settings-feedback-success" role="status">
             <CheckCircle2 :size="16" aria-hidden="true" />
             {{ successMessage }}
@@ -303,35 +286,35 @@ onMounted(() => {
         <div class="settings-card-content">
           <div class="settings-card-heading">
             <div>
-              <h3 id="model-settings-heading">模型连接</h3>
-              <p class="settings-card-subtitle">两个模型分别负责识别截图和润色文案，可使用不同平台的 OpenAI 兼容接口。</p>
+              <h3 id="model-settings-heading">Markdown 整理模型</h3>
+              <p class="settings-card-subtitle">用于把你粘贴的正文整理成结构清晰的 Markdown，保留事实、链接和配图引用。</p>
             </div>
             <span v-if="modelLoading" class="status-badge">正在读取</span>
             <span v-else class="status-badge status-badge-ready">可配置</span>
           </div>
 
-          <p class="settings-action-hint">获取列表只需地址和 Key；选择模型后即可测试，无须先保存。两个模型可以同时测试。</p>
+          <p class="settings-action-hint">获取列表只需地址和 Key；选择模型后即可测试，无须先保存。获取列表、测试和保存可以独立进行。</p>
           <div v-if="modelLoading" class="settings-loading-lines" aria-label="正在读取模型设置"><span></span><span></span></div>
           <div v-else-if="!modelLoadError" class="model-config-grid">
-            <section v-for="kind in (['ocr', 'polish'] as ModelKind[])" :key="kind" class="model-config-panel" :aria-labelledby="`${kind}-model-heading`">
+            <section class="model-config-panel" aria-labelledby="markdown-model-heading">
               <div class="model-config-heading">
-                <div class="model-config-title"><ScanText v-if="kind === 'ocr'" :size="17" /><Sparkles v-else :size="17" /><h4 :id="`${kind}-model-heading`">{{ modelTitle(kind) }}</h4></div>
-                <label class="model-switch"><input v-model="modelConfigs[kind].enabled" type="checkbox" /><span>{{ modelConfigs[kind].enabled ? "已启用" : "未启用" }}</span></label>
+                <div class="model-config-title"><Sparkles :size="17" /><h4 id="markdown-model-heading">Markdown 整理模型</h4></div>
+                <label class="model-switch"><input v-model="modelConfig.enabled" type="checkbox" /><span>{{ modelConfig.enabled ? "已启用" : "未启用" }}</span></label>
               </div>
-              <p class="model-config-description">{{ modelDescription(kind) }}</p>
+              <p class="model-config-description">AI 会根据原文整理标题、段落、列表等 Markdown 格式，不擅自补充事实。</p>
               <div class="model-fields">
-                <label class="model-field model-field-wide"><span>API 地址</span><input v-model.trim="modelConfigs[kind].baseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="url" /></label>
-                <label class="model-field model-field-wide"><span>API Key</span><input v-model="modelConfigs[kind].apiKey" type="text" placeholder="sk-..." autocomplete="off" /></label>
-                <label class="model-field model-field-wide"><span>模型</span><select v-if="availableModels(kind).length" v-model="modelConfigs[kind].model"><option value="">请选择模型</option><option v-if="modelConfigs[kind].model && !availableModels(kind).includes(modelConfigs[kind].model)" :value="modelConfigs[kind].model">自定义：{{ modelConfigs[kind].model }}</option><option v-for="model in availableModels(kind)" :key="model" :value="model">{{ model }}</option></select><input v-model.trim="modelConfigs[kind].model" type="text" class="model-manual-input" placeholder="可手动填写，例如：gpt-4o-mini" autocomplete="off" /></label>
+                <label class="model-field model-field-wide"><span>API 地址</span><input v-model.trim="modelConfig.baseUrl" type="url" placeholder="https://api.example.com/v1" autocomplete="url" /></label>
+                <label class="model-field model-field-wide"><span>API Key</span><input v-model="modelConfig.apiKey" type="text" placeholder="sk-..." autocomplete="off" /></label>
+                <label class="model-field model-field-wide"><span>模型</span><select v-if="availableModels().length" v-model="modelConfig.model"><option value="">请选择模型</option><option v-if="modelConfig.model && !availableModels().includes(modelConfig.model)" :value="modelConfig.model">自定义：{{ modelConfig.model }}</option><option v-for="model in availableModels()" :key="model" :value="model">{{ model }}</option></select><input v-else v-model.trim="modelConfig.model" type="text" class="model-manual-input" placeholder="可手动填写，例如：gpt-4o-mini" autocomplete="off" /></label>
               </div>
               <div class="model-actions">
-                <button class="button button-secondary" type="button" :disabled="modelOperations[kind].fetch.pending || !modelConfigs[kind].baseUrl || !modelConfigs[kind].apiKey" @click="fetchModels(kind)"><LoaderCircle v-if="modelOperations[kind].fetch.pending" :size="15" class="model-spin" /><RefreshCw v-else :size="15" />{{ modelOperations[kind].fetch.pending ? "获取中..." : "获取模型列表" }}</button>
-                <button class="button button-secondary" type="button" :disabled="modelOperations[kind].test.pending || !modelConfigs[kind].baseUrl || !modelConfigs[kind].apiKey || !modelConfigs[kind].model" @click="testConfiguredModel(kind)"><LoaderCircle v-if="modelOperations[kind].test.pending" :size="15" class="model-spin" /><CheckCircle2 v-else :size="15" />{{ modelOperations[kind].test.pending ? "测试中..." : "测试模型" }}</button>
-                <button class="button button-primary" type="button" :disabled="modelOperations[kind].save.pending" @click="saveModel(kind)"><LoaderCircle v-if="modelOperations[kind].save.pending" :size="15" class="model-spin" /><Save v-else :size="15" />{{ modelOperations[kind].save.pending ? "保存中..." : "保存配置" }}</button>
+                <button class="button button-secondary" type="button" :disabled="modelOperations.fetch.pending || !modelConfig.baseUrl || !modelConfig.apiKey" @click="fetchModels"><LoaderCircle v-if="modelOperations.fetch.pending" :size="15" class="model-spin" /><RefreshCw v-else :size="15" />{{ modelOperations.fetch.pending ? "获取中..." : "获取模型列表" }}</button>
+                <button class="button button-secondary" type="button" :disabled="modelOperations.test.pending || !modelConfig.baseUrl || !modelConfig.apiKey || !modelConfig.model" @click="testConfiguredModel"><LoaderCircle v-if="modelOperations.test.pending" :size="15" class="model-spin" /><CheckCircle2 v-else :size="15" />{{ modelOperations.test.pending ? "测试中..." : "测试模型" }}</button>
+                <button class="button button-primary" type="button" :disabled="modelOperations.save.pending" @click="saveModel"><LoaderCircle v-if="modelOperations.save.pending" :size="15" class="model-spin" /><Save v-else :size="15" />{{ modelOperations.save.pending ? "保存中..." : "保存配置" }}</button>
               </div>
               <template v-for="operation in (['fetch', 'test', 'save'] as ModelOperation[])" :key="operation">
-                <p v-if="modelOperations[kind][operation].message" class="settings-feedback" :class="modelOperations[kind][operation].tone === 'error' ? 'settings-feedback-error' : modelOperations[kind][operation].tone === 'success' ? 'settings-feedback-success' : 'model-feedback-notice'" role="status"><CheckCircle2 v-if="modelOperations[kind][operation].tone === 'success'" :size="15" /><Info v-else-if="modelOperations[kind][operation].tone === 'notice'" :size="15" />{{ modelOperations[kind][operation].message }}</p>
-                <p v-if="modelOperations[kind][operation].detail" class="model-test-result" role="status">接口返回：{{ modelOperations[kind][operation].detail }}</p>
+                <p v-if="modelOperations[operation].message" class="settings-feedback" :class="modelOperations[operation].tone === 'error' ? 'settings-feedback-error' : modelOperations[operation].tone === 'success' ? 'settings-feedback-success' : 'model-feedback-notice'" role="status"><CheckCircle2 v-if="modelOperations[operation].tone === 'success'" :size="15" /><Info v-else-if="modelOperations[operation].tone === 'notice'" :size="15" />{{ modelOperations[operation].message }}</p>
+                <p v-if="modelOperations[operation].detail" class="model-test-result" role="status">接口返回：{{ modelOperations[operation].detail }}</p>
               </template>
             </section>
           </div>
@@ -354,7 +337,7 @@ onMounted(() => {
 
     <div class="settings-footnote">
       <Settings2 :size="16" aria-hidden="true" />
-      <span>更多设置会随资料库、识别和编辑功能逐步加入。</span>
+      <span>更多设置会随资料库和编辑功能逐步加入。</span>
     </div>
   </section>
 </template>

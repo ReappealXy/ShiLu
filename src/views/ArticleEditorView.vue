@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Archive, ArchiveRestore, ArrowLeft, Check, FileText, ImagePlus, LoaderCircle, Save, Sparkles, X } from "@lucide/vue";
+import { Archive, ArchiveRestore, ArrowLeft, Check, FileText, LoaderCircle, Save, Sparkles, X } from "@lucide/vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { onBeforeRouteLeave, onBeforeRouteUpdate, useRoute, useRouter } from "vue-router";
@@ -10,7 +10,7 @@ import { readArticle, saveArticle, setArticleStatus, type ArticleDocument, type 
 import { getModelSettings, polishWithModel } from "../services/model";
 import { importArticleSources, type ImageSource } from "../services/capture";
 import { hasPastedText, imageFromBlob, pastedImageFiles, readClipboardImages } from "../services/clipboard";
-import { articleImageUrl, localImageReferences, renderArticleMarkdown } from "../services/markdown";
+import { localImageReferences, renderArticleMarkdown } from "../services/markdown";
 import { displayPath } from "../services/paths";
 
 const route = useRoute();
@@ -18,12 +18,8 @@ const router = useRouter();
 const articleReference = String(route.params.id ?? "");
 const article = ref<ArticleDocument | null>(null);
 const title = ref("");
-const summary = ref("");
 const sourceUrl = ref("");
-const tagsText = ref("");
 const content = ref("");
-const notes = ref("");
-const sourceImages = ref<string[]>([]);
 const editor = ref<InstanceType<typeof MarkdownEditor>>();
 const fileInput = ref<HTMLInputElement>();
 const loading = ref(true);
@@ -61,25 +57,18 @@ async function loadArticle() {
     if (disposed) return;
     article.value = document;
     title.value = document.title;
-    summary.value = document.summary;
     sourceUrl.value = document.sourceUrl;
-    tagsText.value = document.tags.join(", ");
     content.value = document.content;
-    notes.value = document.notes;
-    sourceImages.value = [...(document.sourceImages ?? [])];
     dirty.value = false;
     loaded = true;
-    if (route.query.ocr === "success") successMessage.value = "OCR 识别完成，正文已填入编辑区。";
   } catch (error) { errorMessage.value = getErrorMessage(error, "无法读取资料，请返回列表后重试。"); }
   finally { loading.value = false; }
 }
 
 function snapshot(nextStatus?: ArticleStatus) {
   return {
-    title: title.value.trim() || "未命名资料", summary: summary.value, sourceUrl: sourceUrl.value,
-    tags: tagsText.value.split(/[,，]/).map(tag => tag.trim()).filter(Boolean),
-    content: content.value, notes: notes.value, captureStep: 3 as const,
-    sourceImages: [...sourceImages.value],
+    title: title.value.trim() || "未命名资料", sourceUrl: sourceUrl.value,
+    content: content.value,
     ...(nextStatus ? { status: nextStatus } : {}),
   };
 }
@@ -155,7 +144,7 @@ async function runPolish() {
   polishBase.value = content.value;
   try {
     const settings = await getModelSettings();
-    if (!settings.polishModel?.enabled) throw new Error("请先在设置中配置并启用文案润色模型。");
+    if (!settings.polishModel?.enabled) throw new Error("请先在设置中配置并启用 Markdown 整理模型。");
     const result = await polishWithModel(settings.polishModel, polishBase.value);
     if (disposed) return;
     if (!result.trim()) throw new Error("模型没有返回文字，请重新测试润色模型。");
@@ -188,19 +177,9 @@ async function addImages(load: () => Promise<ImageSource[]>) {
     const result = await importArticleSources(articleReference, sources);
     if (disposed) return;
     await editor.value?.insert(result.images.map(image => `\n\n![配图](${image.relativePath})\n\n`).join(""));
-    if (await persistArticle(false)) successMessage.value = `已插入 ${result.images.length} 张配图，未进行 OCR。`;
+    if (await persistArticle(false)) successMessage.value = `已插入 ${result.images.length} 张正文配图。`;
   } catch (error) { errorMessage.value = getErrorMessage(error, "配图添加失败，正文未被清空，请重试。"); }
   finally { imageBusy.value = false; }
-}
-
-function sourceImageUrl(relativePath: string): string {
-  return article.value ? articleImageUrl(article.value.markdownPath, relativePath) : "";
-}
-
-async function insertSourceImage(relativePath: string) {
-  if (imageBusy.value || statusBusy.value || leaving.value || !article.value) return;
-  await editor.value?.insert(`\n\n![资料配图](${relativePath})\n\n`);
-  successMessage.value = "已将源截图插入正文，保存后会在阅读页显示。";
 }
 
 function pasteImages() { void addImages(async () => (await readClipboardImages()).map(image => image.source)); }
@@ -241,7 +220,7 @@ function onKeydown(event: KeyboardEvent) {
 function onBeforeUnload(event: BeforeUnloadEvent) {
   if (dirty.value || saving.value || imageBusy.value) { event.preventDefault(); event.returnValue = ""; }
 }
-watch([title, summary, sourceUrl, tagsText, content, notes, sourceImages], markEdited, { flush: "sync", deep: true });
+watch([title, sourceUrl, content], markEdited, { flush: "sync", deep: true });
 watch(status, value => window.dispatchEvent(new CustomEvent("shilu:article-status", { detail: value })));
 onBeforeRouteLeave(canLeave);
 onBeforeRouteUpdate(canLeave);
@@ -263,7 +242,6 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
         <button v-else class="button button-secondary" type="button" :disabled="saving || imageBusy || statusBusy || polishRunning" @click="changeStatus(status === 'archived' ? 'active' : 'archived')"><ArchiveRestore v-if="status === 'archived'" :size="16" /><Archive v-else :size="16" />{{ status === 'archived' ? '恢复到资料库' : '归档' }}</button>
       </div>
     </div>
-    <ol v-if="status === 'draft'" class="editor-steps" aria-label="新建资料进度"><li><Check :size="15" />添加截图</li><li><Check :size="15" />补充信息</li><li aria-current="step">3 编辑正文</li></ol>
     <p v-if="successMessage" class="editor-feedback feedback-success" role="status"><Check :size="16" />{{ successMessage }}</p>
     <p v-if="errorMessage" class="editor-feedback feedback-error" role="alert">{{ errorMessage }}<button v-if="dirty" type="button" @click="persistArticle()">重试保存</button></p>
     <div v-if="loading" class="editor-loading" role="status"><LoaderCircle :size="22" class="editor-spin" />正在读取资料...</div>
@@ -273,16 +251,7 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
         <label class="editor-field"><span>标题</span><input v-model="title" aria-label="资料标题" type="text" maxlength="120" :disabled="statusBusy || leaving" /></label>
         <label class="editor-field"><span>来源链接</span><input v-model="sourceUrl" type="url" placeholder="https://" :disabled="statusBusy || leaving" /></label>
       </div>
-      <section v-if="sourceImages.length" class="editor-source-images" aria-labelledby="source-images-heading">
-        <div class="editor-body-heading editor-source-heading"><div><h3 id="source-images-heading">源截图</h3><p>这些图片仅用于 OCR；点击“插入正文”后才会显示在阅读页。</p></div><span>{{ sourceImages.length }} 张</span></div>
-        <div class="editor-source-grid">
-          <figure v-for="(path, index) in sourceImages" :key="path" class="editor-source-item">
-            <img :src="sourceImageUrl(path)" :alt="`源截图 ${index + 1}`" loading="lazy" />
-            <figcaption><span>源截图 {{ index + 1 }}</span><div><button class="button button-tertiary" type="button" :disabled="imageBusy || statusBusy || leaving" @click="insertSourceImage(path)"><ImagePlus :size="14" />插入正文</button></div></figcaption>
-          </figure>
-        </div>
-      </section>
-      <div class="editor-body-heading"><h3>正文</h3><button class="button button-secondary" type="button" :disabled="polishRunning || !content.trim() || imageBusy || statusBusy" @click="runPolish"><LoaderCircle v-if="polishRunning" class="editor-spin" :size="16" /><Sparkles v-else :size="16" />{{ polishRunning ? '正在润色...' : 'AI 润色' }}</button></div>
+      <div class="editor-body-heading"><h3>正文（支持 Markdown）</h3><button class="button button-secondary" type="button" :disabled="polishRunning || !content.trim() || imageBusy || statusBusy" @click="runPolish"><LoaderCircle v-if="polishRunning" class="editor-spin" :size="16" /><Sparkles v-else :size="16" />{{ polishRunning ? '正在整理...' : 'AI 整理为 Markdown' }}</button></div>
       <p v-if="imageBusy" class="editor-feedback" role="status"><LoaderCircle class="editor-spin" :size="16" />正在保存并插入配图...</p>
       <MarkdownEditor ref="editor" v-model="content" :markdown-path="article.markdownPath" :preview-title="title" :preview-source-url="sourceUrl" :disabled="imageBusy || statusBusy || leaving" @paste-image="onPaste" @paste-images="pasteImages" @choose-images="chooseImages" />
       <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden @change="onFiles" />
@@ -296,8 +265,7 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
           <div class="polish-actions"><button class="button button-secondary" type="button" @click="polishText = ''; polishError = ''">放弃</button><button class="button button-primary" type="button" :disabled="polishStale || imageBusy" @click="adoptPolish"><Check :size="16" />采用润色结果</button></div>
         </template>
       </section>
-      <details class="editor-extra"><summary>摘要、标签与备注</summary><div class="editor-fields"><label class="editor-field"><span>摘要</span><textarea v-model="summary" :disabled="statusBusy || leaving" rows="2" /></label><label class="editor-field"><span>标签</span><input v-model="tagsText" :disabled="statusBusy || leaving" placeholder="AI, 写作, 工具" /></label><label class="editor-field notes-field"><span>我的备注</span><textarea v-model="notes" :disabled="statusBusy || leaving" rows="3" /></label></div></details>
-      <details class="editor-extra"><summary>文件信息</summary><p class="editor-path">{{ displayPath(article.markdownPath) }}</p><p class="editor-file-meta">原始截图：{{ article.sourceImages?.length ?? 0 }} 张 · 最后修改：{{ article.updatedAt }}</p></details>
+      <details class="editor-extra"><summary>文件信息</summary><p class="editor-path">{{ displayPath(article.markdownPath) }}</p><p class="editor-file-meta">最后修改：{{ article.updatedAt }}</p></details>
     </template>
   </section>
 </template>
@@ -318,18 +286,6 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
 .editor-field input, .editor-field textarea, .polish-columns textarea { width: 100%; padding: 10px; color: var(--ink); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; font-size: 14px; line-height: 1.65; resize: vertical; }
 .editor-body-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 24px; }
 .editor-body-heading h3 { margin: 0; font-size: 15px; }
-.editor-source-images { margin-top: 24px; padding: 16px 0 2px; border-top: 1px solid var(--line); }
-.editor-source-heading { margin-top: 0; margin-bottom: 12px; }
-.editor-source-heading > div { min-width: 0; }
-.editor-source-heading p { margin: 4px 0 0; color: var(--muted-strong); font-size: 11px; font-weight: 500; }
-.editor-source-heading > span { color: var(--muted-strong); font-size: 12px; white-space: nowrap; }
-.editor-source-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
-.editor-source-item { min-width: 0; margin: 0; overflow: hidden; background: var(--surface-alt); border: 1px solid var(--line); border-radius: 8px; }
-.editor-source-item > img { display: block; width: 100%; height: 150px; object-fit: contain; background: var(--surface); }
-.editor-source-item figcaption { display: grid; gap: 8px; padding: 9px; color: var(--muted-strong); font-size: 11px; }
-.editor-source-item figcaption > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.editor-source-item figcaption > div { display: flex; flex-wrap: wrap; gap: 6px; }
-.button-tertiary { min-height: 30px; padding: 5px 8px; font-size: 11px; }
 .editor-feedback { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 10px 0; padding: 10px 12px; background: var(--surface-alt); border-radius: 6px; font-size: 13px; line-height: 1.65; overflow-wrap: anywhere; }
 .feedback-success { color: var(--success); }
 .feedback-error { color: oklch(0.52 0.18 25); }
@@ -339,7 +295,6 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
 .editor-extra, .polish-review { padding: 18px 0; border-top: 1px solid var(--line); }
 .editor-extra summary { cursor: pointer; color: var(--muted-strong); font-size: 13px; }
 .editor-extra .editor-fields { margin-top: 16px; }
-.notes-field { grid-column: 1 / -1; }
 .polish-review .editor-body-heading { margin-top: 0; margin-bottom: 12px; }
 .polish-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .polish-columns article { padding: 12px; background: var(--surface-alt); max-height: 400px; overflow: auto; }
