@@ -4,7 +4,7 @@ import { Archive, ArchiveRestore, ArrowLeft, Check, ExternalLink, FileText, Load
 import { useRoute, useRouter } from "vue-router";
 import { getErrorMessage } from "../services/library";
 import { deleteArticlePermanently, readArticle, setArticleStatus, type ArticleDocument, type ArticleStatus } from "../services/editor";
-import { cleanDisplayMarkdown, renderArticleMarkdown } from "../services/markdown";
+import { articleImageUrl, cleanDisplayMarkdown, localImageReferences, renderArticleMarkdown } from "../services/markdown";
 
 const route = useRoute();
 const router = useRouter();
@@ -20,7 +20,12 @@ const status = computed<ArticleStatus>(() => article.value?.status ?? "active");
 const statusLabel = computed(() => ({ draft: "处理中", active: "已收录", archived: "已归档" })[status.value]);
 const returnPath = computed(() => status.value === "archived" ? "/archive" : "/library");
 const returnLabel = computed(() => status.value === "archived" ? "返回归档箱" : "返回资料库");
-const renderedBody = computed(() => renderArticleMarkdown(cleanDisplayMarkdown(article.value?.content ?? "", article.value?.title ?? ""), article.value?.markdownPath ?? ""));
+const displayMarkdown = computed(() => cleanDisplayMarkdown(article.value?.content ?? "", article.value?.title ?? ""));
+const contentImages = computed(() => localImageReferences(displayMarkdown.value));
+const renderedBody = computed(() => renderArticleMarkdown(
+  displayMarkdown.value.replace(/!\[[^\]]*\]\(images\/[a-zA-Z0-9_.-]+\.(?:png|jpe?g|webp)\)/gi, ""),
+  article.value?.markdownPath ?? "",
+));
 
 function editArticle() {
   if (!article.value) return;
@@ -117,6 +122,9 @@ onMounted(() => void loadArticle());
           </div>
         </header>
 
+        <div v-if="contentImages.length" class="article-detail-images" aria-label="正文配图">
+          <img v-for="(path, index) in contentImages" :key="`${path}-${index}`" :src="articleImageUrl(article.markdownPath, path)" :alt="`${article.title || '资料'}的正文配图 ${index + 1}`" loading="lazy" />
+        </div>
         <div class="article-detail-body markdown-body" v-if="article.content.trim()" v-html="renderedBody" />
         <div v-else class="article-detail-empty-body"><FileText :size="24" /><p>还没有正文内容</p><button class="button button-secondary" type="button" @click="editArticle"><SquarePen :size="16" />开始编辑</button></div>
 
@@ -136,8 +144,8 @@ onMounted(() => void loadArticle());
 <style scoped>
 .article-detail-view { max-width: 980px; }
 .article-detail-topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
-.editor-back { display: inline-flex; align-items: center; gap: 6px; padding: 0; border: 0; color: var(--muted-strong); background: transparent; font-size: 12px; }
-.editor-back:hover { color: var(--primary); }
+.editor-back { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 7px 11px 7px 8px; border: 1px solid var(--line); color: var(--muted-strong); background: var(--surface); border-radius: 8px; font-size: 12px; box-shadow: var(--shadow-sm); transition: color 160ms ease, border-color 160ms ease, transform 160ms ease; }
+.editor-back:hover { color: var(--primary); border-color: var(--primary); transform: translateX(-2px); }
 .article-detail-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .button-danger { color: var(--danger, #c2413b); border-color: color-mix(in srgb, var(--danger, #c2413b) 35%, var(--line-strong)); background: color-mix(in srgb, var(--danger, #c2413b) 8%, var(--surface)); }
 .button-danger:hover:not(:disabled) { color: #fff; border-color: var(--danger, #c2413b); background: var(--danger, #c2413b); }
@@ -157,6 +165,8 @@ onMounted(() => void loadArticle());
 .article-detail-source-footer { margin: 0 32px 28px; padding-top: 18px; border-top: 1px solid var(--line); }
 .article-detail-source span { overflow-wrap: anywhere; }
 .article-detail-body { padding: 0 32px 30px; }
+.article-detail-images { display: grid; gap: 14px; padding: 0 32px 26px; }
+.article-detail-images img { display: block; width: 100%; max-height: 620px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-alt); }
 .article-detail-body :deep(.image-unavailable) { display: none; }
 .article-detail-empty-body { display: flex; min-height: 220px; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted-strong); border-top: 1px solid var(--line); }
 .article-detail-empty-body p { margin: 0 0 4px; }
@@ -167,6 +177,7 @@ onMounted(() => void loadArticle());
   .article-detail-actions { width: 100%; justify-content: flex-start; }
   .article-detail-heading-line h1 { font-size: 26px; }
   .article-detail-header, .article-detail-body { padding-right: 20px; padding-left: 20px; }
+  .article-detail-images { padding-right: 20px; padding-left: 20px; }
   .article-detail-source-footer { margin-right: 20px; margin-left: 20px; }
   .article-detail-footer { align-items: flex-start; flex-direction: column; padding-right: 20px; padding-left: 20px; }
   .article-detail-footer time { white-space: normal; }

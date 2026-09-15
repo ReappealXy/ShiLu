@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { Archive, ArchiveRestore, Check, LibraryBig, LoaderCircle, Plus, RefreshCw, Search, Settings } from "@lucide/vue";
+import { Archive, ArchiveRestore, Check, LibraryBig, LoaderCircle, Plus, RefreshCw, Search, Settings, Trash2 } from "@lucide/vue";
 import { getErrorMessage, getLibraryStatus, type LibraryStatus } from "../services/library";
-import { listArticles, setArticleStatus, type ArticleStatus, type ArticleSummary } from "../services/editor";
+import { deleteArticlePermanently, listArticles, setArticleStatus, type ArticleStatus, type ArticleSummary } from "../services/editor";
 
 const route = useRoute();
 const status = computed<ArticleStatus>(() => route.meta.articleStatus === "archived" ? "archived" : "active");
@@ -40,7 +40,7 @@ async function loadLibraryStatus() {
 }
 async function changeStatus(article: ArticleSummary) {
   if (pending.value.has(article.folderName)) return;
-  pending.value.add(article.folderName);
+  pending.value = new Set(pending.value).add(article.folderName);
   errorMessage.value = "";
   successMessage.value = "";
   try {
@@ -50,7 +50,33 @@ async function changeStatus(article: ArticleSummary) {
     successMessage.value = next === "archived" ? `“${article.title}”已归档，可在归档箱恢复。` : `“${article.title}”已恢复到资料库。`;
     await loadArticles();
   } catch (error) { if (!disposed) errorMessage.value = getErrorMessage(error, "操作失败，资料保留在原位置，请重试。"); }
-  finally { pending.value.delete(article.folderName); }
+  finally {
+    const nextPending = new Set(pending.value);
+    nextPending.delete(article.folderName);
+    pending.value = nextPending;
+  }
+}
+async function deleteArticle(article: ArticleSummary) {
+  if (pending.value.has(article.folderName)) return;
+  const title = article.title || "未命名资料";
+  if (!window.confirm(`确定永久删除“${title}”吗？\nMarkdown 文件夹及其中的图片都会被删除，且无法恢复。`)) return;
+
+  pending.value = new Set(pending.value).add(article.folderName);
+  errorMessage.value = "";
+  successMessage.value = "";
+  try {
+    await deleteArticlePermanently(article.folderName);
+    if (disposed) return;
+    successMessage.value = `“${title}”已永久删除，本地文件和图片已清理。`;
+    window.dispatchEvent(new CustomEvent("shilu:article-deleted", { detail: article.folderName }));
+    await loadArticles();
+  } catch (error) {
+    if (!disposed) errorMessage.value = getErrorMessage(error, "永久删除失败，资料仍然保留。请重试。");
+  } finally {
+    const nextPending = new Set(pending.value);
+    nextPending.delete(article.folderName);
+    pending.value = nextPending;
+  }
 }
 function articleLink(article: ArticleSummary) {
   return { path: `/articles/${article.folderName}`, query: { from: status.value === "archived" ? "archive" : "library" } };
@@ -95,7 +121,10 @@ onBeforeUnmount(() => { disposed = true; ++requestId; if (searchTimer) window.cl
       <div class="article-list" :aria-label="`${heading}列表`" :aria-busy="loadingArticles">
         <article v-for="article in articles" :key="article.folderName" class="article-row">
           <RouterLink class="article-open" :to="articleLink(article)"><span class="article-row-icon"><Archive v-if="status === 'archived'" :size="20" /><LibraryBig v-else :size="20" /></span><span class="article-row-main"><strong>{{ article.title }}</strong><small>{{ articleExcerpt(article) }}</small><small v-if="article.sourceUrl" class="article-row-source">{{ article.sourceUrl }}</small></span><time class="article-row-date">{{ formatDate(article.updatedAt) }}</time></RouterLink>
-          <button class="icon-button article-status-action" type="button" :title="status === 'archived' ? '恢复到资料库' : '归档'" :aria-label="`${status === 'archived' ? '恢复' : '归档'}：${article.title}`" :disabled="pending.has(article.folderName)" @click="changeStatus(article)"><LoaderCircle v-if="pending.has(article.folderName)" :size="17" class="collection-spin" /><ArchiveRestore v-else-if="status === 'archived'" :size="17" /><Archive v-else :size="17" /></button>
+          <div class="article-row-actions">
+            <button class="icon-button article-status-action" type="button" :title="status === 'archived' ? '恢复到资料库' : '归档'" :aria-label="`${status === 'archived' ? '恢复' : '归档'}：${article.title}`" :disabled="pending.has(article.folderName)" @click="changeStatus(article)"><LoaderCircle v-if="pending.has(article.folderName)" :size="17" class="collection-spin" /><ArchiveRestore v-else-if="status === 'archived'" :size="17" /><Archive v-else :size="17" /></button>
+            <button class="icon-button article-delete-action" type="button" title="永久删除" :aria-label="`永久删除：${article.title}`" :disabled="pending.has(article.folderName)" @click="deleteArticle(article)"><LoaderCircle v-if="pending.has(article.folderName)" :size="17" class="collection-spin" /><Trash2 v-else :size="17" /></button>
+          </div>
         </article>
       </div>
     </template>
@@ -109,9 +138,11 @@ onBeforeUnmount(() => { disposed = true; ++requestId; if (searchTimer) window.cl
 .library-search input { min-width: 0; width: 100%; color: var(--ink); background: transparent; border: 0; outline: 0; font-size: 13px; }
 .library-result-count { color: var(--muted-strong); font-size: 12px; white-space: nowrap; }
 .article-list { border-top: 1px solid var(--line); }
-.article-row { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 4px 0; }
-.article-row:hover { background: var(--surface-alt); }
-.article-open { display: flex; flex: 1; align-items: center; gap: 14px; min-width: 0; padding: 16px 8px; text-decoration: none; color: var(--ink); }
+.article-row { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 4px 0; transition: background-color 160ms ease, box-shadow 160ms ease; }
+.article-row:hover { background: var(--surface-alt); box-shadow: inset 3px 0 0 var(--primary-soft); }
+.article-open { display: flex; flex: 1; align-items: center; gap: 14px; min-width: 0; padding: 16px 8px; text-decoration: none; color: var(--ink); border-radius: 6px; outline: 0; }
+.article-open:hover .article-row-main strong { color: var(--primary); }
+.article-open:focus-visible { box-shadow: 0 0 0 2px var(--focus); }
 .article-row-icon { display: grid; width: 36px; height: 36px; flex-shrink: 0; place-items: center; color: var(--primary); background: var(--primary-soft); border-radius: 6px; }
 .article-row-main { min-width: 0; flex: 1; }
 .article-row-main strong, .article-row-main small { display: block; overflow-wrap: anywhere; }
@@ -119,7 +150,10 @@ onBeforeUnmount(() => { disposed = true; ++requestId; if (searchTimer) window.cl
 .article-row-main small { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 5px; color: var(--muted-strong); font-size: 12px; }
 .article-row-main .article-row-source { -webkit-line-clamp: 1; margin-top: 4px; color: var(--primary); font-size: 11px; }
 .article-row-date { color: var(--muted-strong); font-size: 11px; white-space: nowrap; }
-.article-status-action { margin-right: 8px; flex-shrink: 0; }
+.article-row-actions { display: flex; align-items: center; gap: 4px; margin-right: 8px; flex-shrink: 0; }
+.article-status-action, .article-delete-action { flex-shrink: 0; }
+.article-delete-action { color: var(--danger, #c2413b); }
+.article-delete-action:hover:not(:disabled), .article-delete-action:focus-visible { color: var(--danger, #c2413b); background: color-mix(in srgb, var(--danger, #c2413b) 12%, var(--surface)); }
 .collection-empty { min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; color: var(--muted-strong); text-align: center; }
 .collection-empty h3 { color: var(--ink); font-size: 16px; margin: 0; }
 .collection-feedback { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: var(--surface-alt); border-radius: 6px; font-size: 13px; overflow-wrap: anywhere; }
