@@ -721,11 +721,29 @@ fn inspect_library(root: &Path) -> (bool, Vec<String>, usize) {
                 .filter(|entry| {
                     entry.path().is_dir()
                         && is_valid_article_folder_name(&entry.file_name().to_string_lossy())
+                        && article_folder_is_active(&entry.path())
                 })
                 .count()
         })
         .unwrap_or(0);
     (missing_items.is_empty(), missing_items, article_count)
+}
+
+/// Count only published/active articles in the settings summary. Legacy files
+/// without a status field are treated as active by `parse_article_markdown`.
+fn article_folder_is_active(folder_path: &Path) -> bool {
+    let folder_name = match folder_path.file_name().and_then(|name| name.to_str()) {
+        Some(name) => name,
+        None => return false,
+    };
+    let article_id = article_id_from_folder_name(folder_name).unwrap_or_default();
+    let markdown_path = folder_path.join("index.md");
+    fs::read_to_string(markdown_path)
+        .map(|markdown| {
+            parse_article_markdown(&markdown, article_id, folder_name).status
+                == ArticleStatus::Active
+        })
+        .unwrap_or(false)
 }
 
 fn create_article_skeleton_at(
@@ -2713,6 +2731,29 @@ mod tests {
         let cleanup = fs::remove_dir_all(&root);
         result.expect("初始化与文章创建应成功");
         cleanup.expect("应清理精确的测试目录");
+    }
+
+    #[test]
+    fn library_status_counts_only_active_articles() {
+        let root = temporary_library_root("active-count");
+        fs::create_dir_all(&root).expect("应创建测试目录");
+        let result = (|| -> StorageResult<()> {
+            initialize_library_at(&root)?;
+            let active = create_article_skeleton_at(&root, "正式资料", None)?;
+            let draft = create_article_skeleton_at(&root, "旧草稿", None)?;
+            let draft_markdown = fs::read_to_string(&draft.markdown_path)
+                .map_err(|error| StorageError::io("无法读取草稿 Markdown", error))?;
+            write_text_atomic(
+                Path::new(&draft.markdown_path),
+                &draft_markdown.replace("status: \"active\"", "status: \"draft\""),
+            )?;
+            let (_, _, count) = inspect_library(&root);
+            assert!(Path::new(&active.markdown_path).is_file());
+            assert_eq!(count, 1);
+            Ok(())
+        })();
+        fs::remove_dir_all(&root).expect("应清理测试目录");
+        result.expect("资料库数量应只统计正式资料");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { onMounted, ref } from "vue";
 import { Archive, ArrowRight, FileText, Image as ImageIcon } from "@lucide/vue";
 import { listArticles, type ArticleSummary } from "../services/editor";
 import { getErrorMessage } from "../services/library";
@@ -9,7 +9,6 @@ const imageCount = ref(0);
 const archiveCount = ref(0);
 const loading = ref(true);
 const error = ref("");
-const recent = computed(() => articles.value.slice(0, 5));
 function imageUrl(article: ArticleSummary) {
   return article.firstContentImage ? articleImageUrl(article.markdownPath, article.firstContentImage) : "";
 }
@@ -59,17 +58,17 @@ onMounted(async () => {
     <section class="content-panel dashboard-empty-panel" aria-labelledby="recent-heading">
       <div class="panel-heading">
         <div>
-          <p class="panel-kicker">最近整理</p>
-          <h3 id="recent-heading">{{ loading ? '正在读取资料' : recent.length ? '最近保存的资料' : '还没有可显示的资料' }}</h3>
+          <p class="panel-kicker">按最近更新时间排序</p>
+          <h3 id="recent-heading">{{ loading ? '正在读取资料' : articles.length ? '全部已收录资料' : '还没有可显示的资料' }}</h3>
         </div>
       </div>
       <p v-if="error" class="dashboard-error" role="alert">{{ error }} <RouterLink to="/settings">前往设置</RouterLink></p>
-      <div v-else-if="!loading && !recent.length" class="empty-state empty-state-inline">
+      <div v-else-if="!loading && !articles.length" class="empty-state empty-state-inline">
         <span class="empty-state-icon"><Archive :size="26" aria-hidden="true" /></span>
-        <p>资料保存后会显示在这里，方便你回看最近整理的内容。</p>
+        <p>资料保存后会显示在这里，方便你回看已收录的内容。</p>
       </div>
-      <div v-else class="dashboard-recent" aria-label="最近保存的资料">
-        <RouterLink v-for="item in recent" :key="item.folderName" class="dashboard-recent-card" :to="`/articles/${item.folderName}`">
+      <div v-else class="dashboard-recent" aria-label="全部已收录资料">
+        <RouterLink v-for="item in articles" :key="item.folderName" class="dashboard-recent-card" :to="`/articles/${item.folderName}`">
           <span class="dashboard-card-media">
             <img v-if="imageUrl(item)" :src="imageUrl(item)" :alt="`${item.title} 的正文配图`" loading="lazy" />
             <span v-else class="dashboard-card-placeholder" aria-hidden="true"><ImageIcon :size="25" /></span>

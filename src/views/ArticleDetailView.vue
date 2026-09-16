@@ -144,8 +144,6 @@ onMounted(() => void loadArticle());
 <style scoped>
 .article-detail-view { max-width: 980px; }
 .article-detail-topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
-.editor-back { display: inline-flex; align-items: center; gap: 8px; min-height: 34px; padding: 7px 11px 7px 8px; border: 1px solid var(--line); color: var(--muted-strong); background: var(--surface); border-radius: 8px; font-size: 12px; box-shadow: var(--shadow-sm); transition: color 160ms ease, border-color 160ms ease, transform 160ms ease; }
-.editor-back:hover { color: var(--primary); border-color: var(--primary); transform: translateX(-2px); }
 .article-detail-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .button-danger { color: var(--danger, #c2413b); border-color: color-mix(in srgb, var(--danger, #c2413b) 35%, var(--line-strong)); background: color-mix(in srgb, var(--danger, #c2413b) 8%, var(--surface)); }
 .button-danger:hover:not(:disabled) { color: #fff; border-color: var(--danger, #c2413b); background: var(--danger, #c2413b); }

@@ -273,7 +273,6 @@ onBeforeUnmount(() => { disposed = true; window.removeEventListener("keydown", o
 <style scoped>
 .editor-heading { gap: 16px; margin-bottom: 20px; }
 .editor-heading h2 { overflow-wrap: anywhere; font-size: 22px; line-height: 1.5; }
-.editor-back { display: inline-flex; align-items: center; gap: 6px; padding: 0; margin-bottom: 12px; border: 0; color: var(--muted-strong); background: transparent; font-size: 12px; }
 .article-status { display: inline-block; vertical-align: middle; padding: 3px 7px; color: var(--primary); background: var(--primary-soft); border-radius: 4px; font-size: 11px; font-weight: 600; }
 .page-heading > .editor-actions { flex: 0 1 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .save-hint { width: 100%; color: var(--muted-strong); text-align: right; font-size: 12px; }

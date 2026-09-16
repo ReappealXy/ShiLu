@@ -302,6 +302,24 @@ kbd { min-width: 39px; padding: 3px 5px; color: var(--muted); background: var(--
 .button-primary:hover { background: var(--primary-hover); }
 .button-secondary { background: var(--surface); border-color: var(--line-strong); }
 .button-secondary:hover { background: var(--surface-alt); border-color: var(--muted); }
+/* Shared by capture, article editor and reader so no route falls back to native button styles. */
+.editor-back {
+  appearance: none; display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  min-height: 36px; max-width: 100%; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 9px;
+  background: var(--surface); color: var(--muted-strong); font-size: 13px; font-weight: 600; line-height: 1.4;
+  text-decoration: none; white-space: nowrap; vertical-align: middle;
+  transition: color 160ms ease-out, background-color 160ms ease-out, border-color 160ms ease-out, transform 160ms ease-out;
+}
+.editor-back svg { flex-shrink: 0; transition: transform 160ms ease-out; }
+.editor-back:hover:not(:disabled) { color: var(--primary); border-color: var(--primary); background: var(--primary-soft); }
+.editor-back:hover:not(:disabled) svg { transform: translateX(-2px); }
+.editor-back:active:not(:disabled) { transform: translateY(1px); }
+.editor-back:focus-visible { outline: 3px solid var(--focus); outline-offset: 3px; }
+.editor-back:disabled { opacity: 0.5; cursor: not-allowed; }
+.page-heading .editor-back { margin-bottom: 12px; }
+@media (prefers-reduced-motion: reduce) {
+  .editor-back, .editor-back svg { transition: none; transform: none !important; }
+}
 .content-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
 
 .overview-stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
